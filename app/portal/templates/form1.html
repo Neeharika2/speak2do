@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Application — Personal Details{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Personal Details</h1>
+  <form method="post" action="/portal/application/form-1">
+    <label for="full_name">Full name</label>
+    <input id="full_name" name="full_name" required minlength="3" value="{{ draft.get('full_name', '') }}">
+
+    <label for="dob">Date of birth</label>
+    <input id="dob" name="dob" type="date" required value="{{ draft.get('dob', '') }}">
+
+    <label for="gender">Gender</label>
+    <select id="gender" name="gender" required>
+      <option value="" selected disabled>Select</option>
+      {% for option in ['Female', 'Male', 'Other'] %}
+      <option {% if draft.get('gender') == option %}selected{% endif %}>{{ option }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="phone">Mobile number</label>
+    <input id="phone" name="phone" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" required value="{{ draft.get('phone', '') }}">
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" required value="{{ draft.get('email', '') }}">
+
+    <button type="submit">{% if 'layout' in hostile %}Continue{% else %}Save &amp; Continue{% endif %}</button>
+  </form>
+</div>
+{% endblock %}

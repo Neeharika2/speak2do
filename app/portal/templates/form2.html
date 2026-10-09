@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Application — Education{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Education Details</h1>
+  <form method="post" action="/portal/application/form-2">
+    <label for="college">College name</label>
+    <input id="college" name="college" required value="{{ draft.get('college', '') }}">
+
+    <label for="course">Course</label>
+    <select id="course" name="course" required>
+      <option value="" selected disabled>Select</option>
+      {% for option in ['Intermediate', 'Diploma', 'UG', 'PG'] %}
+      <option {% if draft.get('course') == option %}selected{% endif %}>{{ option }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="year">Year of study</label>
+    <select id="year" name="year" required>
+      <option value="" selected disabled>Select</option>
+      {% for option in ['1st', '2nd', '3rd', '4th'] %}
+      <option {% if draft.get('year') == option %}selected{% endif %}>{{ option }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="marks">Marks (%)</label>
+    <input id="marks" name="marks" type="number" min="0" max="100" required value="{{ draft.get('marks', '') }}">
+
+    <button type="submit">{% if 'layout' in hostile %}Continue{% else %}Save &amp; Continue{% endif %}</button>
+  </form>
+</div>
+{% endblock %}

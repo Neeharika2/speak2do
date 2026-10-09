@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}OTP — Mock Scholarship Portal{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>One-Time Password</h1>
+  <p class="muted">Enter the 6-digit code sent to your registered mobile number.</p>
+  <form method="post" action="/portal/login/otp">
+    <label for="otp">OTP</label>
+    <input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+    <button type="submit">Verify</button>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Application Status — Mock Scholarship Portal{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Application Status</h1>
+  {% if submitted %}
+  <p><strong>Submitted</strong> — application ID
+    <a href="/portal/receipt/{{ submitted['receipt_id'] }}">{{ submitted["receipt_id"] }}</a>
+    (submitted {{ submitted["submitted_at"] }} UTC).</p>
+  {% elif draft %}
+  <p>Draft in progress for <strong>{{ payload.get('full_name', '') or 'unnamed applicant' }}</strong>.</p>
+  <p class="muted">Last saved {{ draft["updated_at"] }} UTC.</p>
+  {% else %}
+  <p class="muted">No application yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

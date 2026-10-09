@@ -1,0 +1,327 @@
+"""Jev-driven agent loop (M2): observe -> decide -> validate -> execute -> verify.
+
+Budgets: max actions, wall time, retries per action, token cost cap, LLM fallback calls.
+Guards: no-progress detector (repeated page states / repeated actions), consecutive errors.
+Secrets never enter the model state (values.py redacts; the executor supplies them).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import time
+from pathlib import Path
+from typing import Callable
+
+from app import config, events, policy
+from app.agent import jev_client, llm, values
+from app.agent.observe import observe_page
+from app.browser.controller import BrowserController
+
+PROFILE_PATH = config.REPO_ROOT / "profile" / "demo_profile.json"
+
+OPERATION_QUESTION = {
+    "type": "choice",
+    "instructions": (
+        "Choose the next operation that advances the goal on this page. Fill empty required fields "
+        "before clicking buttons; never repeat an action that is already reflected in element values."
+    ),
+    "criteria": {
+        "click": "Click the selected element (link, button, or checkbox).",
+        "type": "Type the required value into the selected text field.",
+        "select": "Choose an option in the selected dropdown.",
+        "wait": "The page is still changing; wait briefly and decide again.",
+        "done": "The goal is already complete on this page.",
+        "blocked": "No listed element action can safely advance the goal.",
+    },
+}
+
+
+def _element_summary(element: dict) -> str:
+    base = f'{element["role"]} "{element["label"]}"'
+    tag, etype, value = element["tag"], element["type"], element["value"]
+    if tag in ("input", "textarea") and etype not in ("checkbox", "radio", "submit", "button"):
+        return base + (f" (filled: {value})" if value else " (empty)")
+    if tag == "select":
+        if value in ("", "Select"):
+            return base + " (no selection)"
+        return base + f" (selected: {value})"
+    if etype in ("checkbox", "radio"):
+        return base + (" (checked)" if value == "checked" else " (unchecked)")
+    return base
+
+
+def _signature(obs: dict) -> str:
+    parts = [obs["path"]]
+    for element in obs["elements"][:18]:
+        parts.append(f"{element['label']}|{element['value']}")
+    return hashlib.md5("||".join(parts).encode()).hexdigest()
+
+
+async def _decide(goal: str, obs: dict, recent: list[str]) -> tuple[dict, int]:
+    candidates = obs["elements"][:18]
+    if not candidates:
+        return {"operation": "blocked", "target": None}, 0
+    questions: dict = {"operation": OPERATION_QUESTION}
+    if len(candidates) >= 2:
+        questions["target"] = {
+            "type": "choice",
+            "instructions": "If click/type/select was chosen, pick the target element id.",
+            "criteria": {str(e["id"]): _element_summary(e) for e in candidates},
+        }
+    state = {
+        "goal": goal,
+        "page": {"path": obs["path"], "heading": obs["heading"]},
+        "elements": [
+            {"id": e["id"], "role": e["role"], "label": e["label"], "value": e["value"]} for e in candidates
+        ],
+        "recent_actions": recent[-6:],
+    }
+    data = await jev_client.decide(state, questions)
+    usage = data.get("usage", {}) or {}
+    tokens = int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0))
+    answers = data.get("answers", {}) or {}
+    operation = (answers.get("operation") or {}).get("choice")
+    target = (answers.get("target") or {}).get("choice")
+    if target is None and len(candidates) == 1:
+        target = str(candidates[0]["id"])
+    return {"operation": operation, "target": None if target is None else str(target)}, tokens
+
+
+def _choose_option(options: list[dict], wanted: str) -> dict | None:
+    wanted = (wanted or "").strip().lower()
+    usable = [o for o in options if not o["disabled"] and o["text"] and o["text"].strip().lower() != "select"]
+    if not usable:
+        return None
+    for option in usable:
+        if option["text"].lower() == wanted:
+            return option
+    if wanted:
+        for option in usable:
+            text = option["text"].lower()
+            if text.startswith(wanted) or wanted.startswith(text):
+                return option
+    return usable[0]
+
+
+async def _perform(browser: BrowserController, element: dict, operation: str, value: str) -> None:
+    assert browser.page is not None
+    locator = browser.page.locator(f'[data-agent-id="{element["id"]}"]')
+    await locator.wait_for(state="attached", timeout=5000)
+    if operation == "click":
+        await locator.click(timeout=5000)
+    elif operation == "type":
+        await locator.fill(value, timeout=5000)
+    elif operation == "select":
+        options = await locator.evaluate(
+            "el => Array.from(el.options).map(o => ({text: o.text.trim(), value: o.value, disabled: o.disabled}))"
+        )
+        chosen = _choose_option(options, value)
+        if chosen is None:
+            raise RuntimeError(f"no option for {value!r} in {[o['text'] for o in options]}")
+        await locator.select_option(value=chosen["value"] or chosen["text"], timeout=5000)
+    else:
+        raise ValueError(f"unsupported operation: {operation}")
+
+
+async def run_agent_goal(
+    goal: str,
+    *,
+    trace_id: str,
+    start_url: str,
+    success_url: str = "",
+    max_actions: int = 50,
+    max_seconds: float = 300.0,
+    max_retries: int = 2,
+    max_tokens: int = 60_000,
+    max_llm_calls: int = 15,
+    live_dir: Path | None = None,
+    headless: bool = True,
+    on_step: Callable[[str], None] | None = None,
+) -> dict:
+    """Run the observe/decide/act loop until success or a budget/guard stops it."""
+    started = time.monotonic()
+    profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    browser = BrowserController(headless=headless)
+    await browser.start()
+
+    actions: list[str] = []
+    step_durations: list[float] = []
+    recent: list[str] = []
+    tokens = 0
+    llm_calls = 0
+    stall = 0
+    consecutive_errors = 0
+    stop_reason = "action_budget"
+    error: str | None = None
+    last_signature = ""
+    final_url = ""
+
+    def goal_reached() -> bool:
+        return bool(success_url) and browser.page is not None and success_url in browser.page.url
+
+    try:
+        await browser.goto(start_url)
+        events.log_event(trace_id, "agent.start", goal=goal, start_url=start_url, success_url=success_url)
+
+        while True:
+            if goal_reached():
+                stop_reason = "done"
+                break
+            if len(actions) >= max_actions:
+                stop_reason = "action_budget"
+                break
+            if time.monotonic() - started > max_seconds:
+                stop_reason = "time_budget"
+                break
+            if tokens > max_tokens:
+                stop_reason = "cost_budget"
+                break
+
+            step_started = time.perf_counter()
+            try:
+                obs = await observe_page(browser.page)
+            except Exception as exc:  # noqa: BLE001
+                stop_reason, error = "observe_error", str(exc)
+                break
+
+            if goal_reached():
+                stop_reason = "done"
+                break
+
+            signature = _signature(obs)
+            stall = stall + 1 if signature == last_signature else 0
+            last_signature = signature
+            if stall >= 4:
+                stop_reason = "no_progress"
+                break
+
+            try:
+                decision, used = await _decide(goal, obs, recent)
+            except Exception as exc:  # noqa: BLE001
+                stop_reason, error = "decision_error", str(exc)
+                break
+            tokens += used
+
+            operation = decision["operation"]
+            target = decision["target"]
+
+            if operation == "blocked":
+                stop_reason = "blocked"
+                break
+            if operation == "done":
+                stop_reason = "done_claimed"
+                break
+            if operation is None:
+                stop_reason, error = "decision_error", "no operation returned"
+                break
+            if operation == "wait":
+                actions.append(f"wait ({obs['path']})")
+                step_durations.append(round(time.perf_counter() - step_started, 2))
+                await asyncio.sleep(1.0)
+                continue
+
+            element = next((e for e in obs["elements"] if str(e["id"]) == str(target)), None)
+            if element is None:
+                actions.append(f"{operation} ? (stale target {target})")
+                consecutive_errors += 1
+                if consecutive_errors >= 3:
+                    stop_reason = "action_errors"
+                    break
+                continue
+
+            value = ""
+            if operation in ("type", "select"):
+                mapped = values.mapped_value(element["label"], profile)
+                if mapped is not None:
+                    value = mapped
+                elif llm_calls < max_llm_calls:
+                    llm_calls += 1
+                    try:
+                        value = await llm.suggest_value(element["label"], obs["path"], profile)
+                    except Exception:  # noqa: BLE001
+                        value = ""
+
+            policy_decision = policy.decide({"kind": operation, "selector": element["label"], "value": value})
+            if policy_decision.verdict != policy.ALLOW:
+                stop_reason = f"policy_{policy_decision.verdict}"
+                break
+
+            label = f"{operation} {element['label']!r}"
+            if value:
+                label += f" = {values.display_value(element['label'], value)}"
+
+            action_error: Exception | None = None
+            for _attempt in range(max_retries + 1):
+                try:
+                    await _perform(browser, element, operation, value)
+                    action_error = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    action_error = exc
+                    await asyncio.sleep(0.3)
+            if action_error is not None:
+                consecutive_errors += 1
+                actions.append(f"{label} [failed: {action_error}]")
+                if consecutive_errors >= 3:
+                    stop_reason = "action_errors"
+                    break
+                continue
+            consecutive_errors = 0
+
+            actions.append(label)
+            recent.append(label)
+            if len(recent) > 6:
+                recent.pop(0)
+            duration = round(time.perf_counter() - step_started, 2)
+            step_durations.append(duration)
+            events.log_event(
+                trace_id,
+                "agent.action",
+                duration_ms=duration * 1000,
+                action=label,
+                operation=operation,
+                target=target,
+                tokens=tokens,
+                policy=policy_decision.verdict,
+            )
+            if on_step:
+                on_step(label)
+            if live_dir is not None:
+                try:
+                    await browser.screenshot(live_dir / "view.png")
+                except Exception:  # noqa: BLE001
+                    pass
+            if len(actions) >= 3 and actions[-1] == actions[-2] == actions[-3]:
+                stop_reason = "no_progress"
+                break
+            await asyncio.sleep(0.15)
+
+        final_url = browser.page.url if browser.page else ""
+    finally:
+        await browser.stop()
+
+    success = stop_reason == "done" or (bool(success_url) and success_url in final_url)
+    result = {
+        "success": success,
+        "stop_reason": stop_reason,
+        "steps": len(actions),
+        "actions": actions,
+        "wall_s": round(time.monotonic() - started, 2),
+        "step_durations_s": step_durations,
+        "tokens": tokens,
+        "llm_calls": llm_calls,
+        "error": error,
+        "final_url": final_url,
+    }
+    events.log_event(
+        trace_id,
+        "agent.done",
+        success=success,
+        stop_reason=stop_reason,
+        steps=len(actions),
+        wall_s=result["wall_s"],
+        tokens=tokens,
+    )
+    return result

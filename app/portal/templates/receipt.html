@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Application Receipt{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Application Receipt</h1>
+  {% if already %}
+  <p class="muted">Already submitted — this is the existing receipt.</p>
+  {% endif %}
+  {% set data = application["payload"] %}
+  <table>
+    <tr><th>Application ID</th><td><strong>{{ application["receipt_id"] }}</strong></td></tr>
+    <tr><th>Name</th><td>{{ data.get('full_name', '—') }}</td></tr>
+    <tr><th>Submitted on</th><td>{{ application["submitted_at"] }} UTC</td></tr>
+    <tr><th>Status</th><td>Submitted</td></tr>
+  </table>
+  <p class="muted" style="margin-top:16px">Keep this application ID for your records.</p>
+  <div class="link-row"><a href="/portal/dashboard">Back to Dashboard</a></div>
+</div>
+{% endblock %}

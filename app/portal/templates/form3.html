@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Application — Address{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Address Details</h1>
+  <form method="post" action="/portal/application/form-3">
+    <label for="address">Address line</label>
+    <input id="address" name="address" required value="{{ draft.get('address', '') }}">
+
+    <label for="city">City / village</label>
+    <input id="city" name="city" required value="{{ draft.get('city', '') }}">
+
+    <label for="state">State</label>
+    <select id="state" name="state" required>
+      <option value="" selected disabled>Select</option>
+      {% for option in ['Andhra Pradesh', 'Telangana'] %}
+      <option {% if draft.get('state') == option %}selected{% endif %}>{{ option }}</option>
+      {% endfor %}
+    </select>
+
+    <label for="district">District</label>
+    <select id="district" name="district" required disabled></select>
+
+    <label for="pin">PIN code</label>
+    <input id="pin" name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required value="{{ draft.get('pin', '') }}">
+
+    <button type="submit">{% if 'layout' in hostile %}Continue{% else %}Save &amp; Continue{% endif %}</button>
+  </form>
+</div>
+<script>
+  const DISTRICTS = {
+    "Andhra Pradesh": ["Guntur", "Krishna", "Kurnool", "Visakhapatnam"],
+    "Telangana": ["Hyderabad", "Warangal", "Karimnagar", "Nizamabad"],
+  };
+  const stateSelect = document.getElementById("state");
+  const districtSelect = document.getElementById("district");
+  function fillDistricts() {
+    const list = DISTRICTS[stateSelect.value] || [];
+    districtSelect.innerHTML = '<option value="" selected disabled>Select</option>';
+    for (const name of list) {
+      const option = document.createElement("option");
+      option.textContent = name;
+      districtSelect.appendChild(option);
+    }
+    districtSelect.disabled = !stateSelect.value;
+  }
+  stateSelect.addEventListener("change", fillDistricts);
+  fillDistricts();
+  const preset = "{{ draft.get('district', '') }}";
+  if (preset) { districtSelect.value = preset; }
+</script>
+{% endblock %}

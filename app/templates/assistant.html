@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Assistant</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #14213d; }
+    header { background: #14213d; color: #fff; padding: 16px 24px; font-weight: 600; font-size: 1.1rem; }
+    main { max-width: 980px; margin: 24px auto; padding: 0 16px 48px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+    .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08); }
+    h1 { font-size: 1.3rem; margin: 0 0 12px; }
+    h2 { font-size: 0.95rem; margin: 18px 0 8px; color: #5b6472; text-transform: uppercase; letter-spacing: 0.04em; }
+    #talk-button { width: 100%; padding: 26px; font-size: 1.3rem; font-weight: 700; border: 0; border-radius: 14px; background: #1f6feb; color: #fff; cursor: pointer; touch-action: none; user-select: none; }
+    #talk-button.recording { background: #d13438; }
+    #status { font-weight: 600; margin: 12px 0 0; min-height: 1.4em; }
+    #status[data-state="error"] { color: #9b1c1c; }
+    #status[data-state="done"] { color: #166534; }
+    #status[data-state="recording"] { color: #b91c1c; }
+    .box { background: #f0f3f8; border-radius: 8px; padding: 10px 12px; min-height: 2.4em; white-space: pre-wrap; }
+    #transcript { font-size: 1.15rem; }
+    input[type="text"] { width: 100%; box-sizing: border-box; font-size: 1.05rem; padding: 10px; border: 1px solid #b9c0cc; border-radius: 8px; }
+    .row { display: flex; gap: 8px; margin-top: 8px; }
+    .row button { padding: 10px 18px; font-size: 1rem; border: 0; border-radius: 8px; background: #14213d; color: #fff; cursor: pointer; }
+    #live-wrap { background: #e8ecf3; border-radius: 8px; min-height: 240px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    #live { max-width: 100%; height: auto; display: block; }
+    #steps { list-style: none; padding: 0; margin: 8px 0 0; font-size: 0.95rem; color: #334155; }
+    #steps li { padding: 4px 0; border-bottom: 1px solid #eef2f7; }
+    audio { width: 100%; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <header>Voice Assistant — Mock Scholarship Portal</header>
+  <main>
+    <section class="card">
+      <h1>Talk to the assistant</h1>
+      <button id="talk-button" type="button">🎤 Hold to talk</button>
+      <p id="status" data-state="idle">Ready — hold the button and speak, or quick-tap to start hands-free.</p>
+
+      <h2>Heard</h2>
+      <div id="transcript" class="box">—</div>
+
+      <h2>Reply</h2>
+      <div id="reply-text" class="box">—</div>
+      <audio id="reply-audio" controls></audio>
+
+      <h2>Or type (fallback)</h2>
+      <input id="text-fallback" type="text" placeholder="e.g. Scholarship application login cheyyi">
+      <div class="row"><button id="text-send" type="button">Send</button></div>
+    </section>
+
+    <section class="card">
+      <h1>Live view</h1>
+      <div id="live-wrap"><img id="live" alt="Agent browser view"></div>
+      <h2>Agent steps</h2>
+      <ol id="steps"></ol>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const talkButton = document.getElementById("talk-button");
+      const statusEl = document.getElementById("status");
+      const transcriptEl = document.getElementById("transcript");
+      const replyEl = document.getElementById("reply-text");
+      const liveImg = document.getElementById("live");
+      const stepsEl = document.getElementById("steps");
+      const audioEl = document.getElementById("reply-audio");
+      const textInput = document.getElementById("text-fallback");
+      const textSend = document.getElementById("text-send");
+
+      let mediaStream = null;
+      let audioContext = null;
+      let sourceNode = null;
+      let processorNode = null;
+      let muteNode = null;
+      let chunks = [];
+      let recording = false;
+      let starting = false;
+      let handsFree = false;
+      let buttonDown = false;
+      let pressStartedAt = 0;
+      let autoStopTimer = null;
+      let currentSession = null;
+      let pollTimer = null;
+
+      const STATUS_TEXT = {
+        queued: "Thinking…",
+        transcribing: "Listening…",
+        running: "Working — watch the live view",
+        speaking: "Replying…",
+        done: "Done",
+        error: "Something went wrong",
+      };
+
+      function setStatus(text, state) {
+        statusEl.textContent = text;
+        statusEl.dataset.state = state;
+      }
+
+      function escapeHtml(value) {
+        const div = document.createElement("div");
+        div.textContent = value;
+        return div.innerHTML;
+      }
+
+      async function ensureMic() {
+        if (mediaStream) return;
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
+
+      function encodeWav(chunkList, sampleRate) {
+        let frames = 0;
+        for (const chunk of chunkList) frames += chunk.length;
+        const buffer = new ArrayBuffer(44 + frames * 2);
+        const view = new DataView(buffer);
+        const writeString = (offset, text) => {
+          for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+        };
+        writeString(0, "RIFF");
+        view.setUint32(4, 36 + frames * 2, true);
+        writeString(8, "WAVE");
+        writeString(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeString(36, "data");
+        view.setUint32(40, frames * 2, true);
+        let offset = 44;
+        for (const chunk of chunkList) {
+          for (let i = 0; i < chunk.length; i += 1) {
+            const sample = Math.max(-1, Math.min(1, chunk[i]));
+            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+            offset += 2;
+          }
+        }
+        return new Blob([view], { type: "audio/wav" });
+      }
+
+      async function startRecording() {
+        if (recording || starting) return;
+        starting = true;
+        try {
+          await ensureMic();
+        } catch (err) {
+          starting = false;
+          setStatus("Microphone unavailable — use the text box below.", "error");
+          return;
+        }
+        chunks = [];
+        recording = true;
+        starting = false;
+        handsFree = !buttonDown;
+        sourceNode = audioContext.createMediaStreamSource(mediaStream);
+        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        processorNode.onaudioprocess = (event) => {
+          if (recording) chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+        };
+        muteNode = audioContext.createGain();
+        muteNode.gain.value = 0;
+        sourceNode.connect(processorNode);
+        processorNode.connect(muteNode);
+        muteNode.connect(audioContext.destination);
+        talkButton.classList.add("recording");
+        autoStopTimer = setTimeout(() => stopRecording(), 30000);
+        if (handsFree) {
+          setStatus("Listening… tap again to send", "recording");
+        } else {
+          setStatus("Listening… release to send", "recording");
+        }
+      }
+
+      async function stopRecording() {
+        if (!recording) return;
+        recording = false;
+        handsFree = false;
+        if (autoStopTimer) {
+          clearTimeout(autoStopTimer);
+          autoStopTimer = null;
+        }
+        talkButton.classList.remove("recording");
+        try {
+          processorNode.disconnect();
+          sourceNode.disconnect();
+          muteNode.disconnect();
+        } catch (err) {
+          /* already disconnected */
+        }
+        if (chunks.length === 0) {
+          setStatus("Nothing recorded — hold the button while speaking.", "error");
+          return;
+        }
+        const wav = encodeWav(chunks, audioContext.sampleRate);
+        await uploadCommand(wav);
+      }
+
+      async function uploadCommand(wavBlob) {
+        setStatus("Thinking…", "queued");
+        const form = new FormData();
+        form.append("audio", wavBlob, "command.wav");
+        try {
+          const response = await fetch("/api/voice/command", { method: "POST", body: form });
+          if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            setStatus(detail.detail || "Upload failed.", "error");
+            return;
+          }
+          const data = await response.json();
+          startPolling(data.session_id);
+        } catch (err) {
+          setStatus("Upload failed: " + err.message, "error");
+        }
+      }
+
+      async function sendText() {
+        const text = textInput.value.trim();
+        if (!text) return;
+        setStatus("Thinking…", "queued");
+        const form = new FormData();
+        form.append("text", text);
+        try {
+          const response = await fetch("/api/voice/text", { method: "POST", body: form });
+          if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            setStatus(detail.detail || "Request failed.", "error");
+            return;
+          }
+          const data = await response.json();
+          startPolling(data.session_id);
+        } catch (err) {
+          setStatus("Request failed: " + err.message, "error");
+        }
+      }
+
+      function startPolling(sessionId) {
+        currentSession = sessionId;
+        replyEl.textContent = "";
+        stepsEl.innerHTML = "";
+        if (pollTimer) clearInterval(pollTimer);
+        poll();
+        pollTimer = setInterval(poll, 800);
+      }
+
+      async function poll() {
+        if (!currentSession) return;
+        try {
+          const response = await fetch(`/api/voice/session/${currentSession}`);
+          if (!response.ok) return;
+          const data = await response.json();
+          setStatus(STATUS_TEXT[data.status] || data.status, data.status);
+          transcriptEl.textContent = data.transcript || "—";
+          replyEl.textContent = data.reply_text || data.error || "—";
+          stepsEl.innerHTML = data.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
+          if (data.status === "running" || data.status === "speaking" || data.status === "done") {
+            liveImg.src = `/api/voice/session/${currentSession}/screenshot?ts=${Date.now()}`;
+          }
+          if (data.status === "done" || data.status === "error") {
+            clearInterval(pollTimer);
+            pollTimer = null;
+            if (data.status === "done") {
+              audioEl.src = `/api/voice/session/${currentSession}/audio?ts=${Date.now()}`;
+              audioEl.play().catch(() => {});
+            }
+          }
+        } catch (err) {
+          /* transient; keep polling */
+        }
+      }
+
+      function onPointerDown(event) {
+        event.preventDefault();
+        talkButton.setPointerCapture(event.pointerId);
+        buttonDown = true;
+        if (recording) {
+          if (handsFree) stopRecording();
+          return;
+        }
+        if (starting) return;
+        pressStartedAt = performance.now();
+        startRecording();
+      }
+
+      function onPointerUp(event) {
+        event.preventDefault();
+        buttonDown = false;
+        if (!recording || starting || handsFree) return;
+        if (performance.now() - pressStartedAt >= 500) {
+          stopRecording();
+        } else {
+          handsFree = true;
+          setStatus("Listening… tap again to send", "recording");
+        }
+      }
+
+      talkButton.addEventListener("pointerdown", onPointerDown);
+      talkButton.addEventListener("pointerup", onPointerUp);
+      talkButton.addEventListener("pointercancel", () => {
+        if (!handsFree) stopRecording();
+      });
+      talkButton.addEventListener("contextmenu", (event) => event.preventDefault());
+      textSend.addEventListener("click", sendText);
+      textInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") sendText();
+      });
+    })();
+  </script>
+</body>
+</html>

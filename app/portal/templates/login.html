@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Login — Mock Scholarship Portal{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Login</h1>
+  <form method="post" action="/portal/login">
+    <label for="user_id">User ID</label>
+    <input id="user_id" name="user_id" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Login</button>
+  </form>
+</div>
+{% endblock %}

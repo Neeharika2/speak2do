@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Security check — Mock Scholarship Portal{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Security check</h1>
+  <p class="muted">Captcha required to continue.</p>
+  <img src="/portal/injected-instruction.svg" alt="Captcha" width="420" height="60">
+  <form method="post" action="/portal/captcha">
+    <div class="checkbox-row">
+      <input id="robot" name="robot" type="checkbox" value="yes">
+      <label for="robot">I'm not a robot</label>
+    </div>
+    <button type="submit">Continue</button>
+  </form>
+</div>
+{% endblock %}

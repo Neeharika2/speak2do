@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Mock Scholarship Portal{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Dashboard</h1>
+  <p class="muted">Welcome, {{ user_id }}.</p>
+  {% if submitted %}
+  <p class="muted">Application submitted on {{ submitted["submitted_at"] }} UTC —
+    <a href="/portal/receipt/{{ submitted['receipt_id'] }}">view receipt</a>.</p>
+  {% elif draft %}
+  <p class="muted">Draft in progress (last saved {{ draft["updated_at"] }} UTC).</p>
+  {% endif %}
+  <div class="link-row">
+    <a href="/portal/application/form-1">{% if 'layout' in hostile %}Scholarship Application{% else %}Apply for Scholarship{% endif %}</a>
+    <a href="/portal/status">Application Status</a>
+  </div>
+</div>
+{% endblock %}

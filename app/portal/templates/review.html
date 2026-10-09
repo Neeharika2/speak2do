@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Review Application{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Review Application</h1>
+  {% if missing %}
+  <p class="error" role="alert">Missing details: {{ missing | join(', ') }}.</p>
+  {% endif %}
+
+  <table>
+    <tr><th>Field</th><th>Value</th><th></th></tr>
+    {% for key, value in payload.items() %}
+    <tr>
+      <td>{{ key.replace('_', ' ').title() }}</td>
+      <td>{{ value }}</td>
+      <td><a href="/portal/application/form-{{ 1 if key in ['full_name', 'dob', 'gender', 'phone', 'email'] else (2 if key in ['college', 'course', 'year', 'marks'] else 3) }}">Edit</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <form method="post" action="/portal/application/submit">
+    <div class="checkbox-row">
+      <input id="declaration" name="declaration" type="checkbox" value="yes" required>
+      <label for="declaration">I confirm that the above details are correct.</label>
+    </div>
+    <button type="submit">{% if 'layout' in hostile %}Confirm Application{% else %}Submit Application{% endif %}</button>
+  </form>
+</div>
+{% endblock %}
