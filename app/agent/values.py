@@ -49,9 +49,11 @@ def mapped_value(label: str, profile: dict) -> str | None:
     return None
 
 
+def is_secret(label: str) -> bool:
+    text = label.lower()
+    return any(word in text for word in ("password", "one-time", "otp"))
+
+
 def display_value(label: str, value: str) -> str:
     """Redact secrets for logs and agent-visible step labels."""
-    text = label.lower()
-    if any(word in text for word in ("password", "one-time", "otp")):
-        return "[REDACTED]"
-    return value
+    return "[REDACTED]" if is_secret(label) else value

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from app import config, events
-from app.agent.demo_flow import run_application_flow
+from app.agent.loop import run_agent_goal
 from app.voice import stt, tts
 
 router = APIRouter()
@@ -26,7 +26,9 @@ SESSIONS_DIR = config.DATA_DIR / "sessions"
 SESSIONS: dict[str, dict] = {}
 ACTIVE_STATES = {"queued", "transcribing", "running", "speaking"}
 
-REPLY_DONE = "Login అయింది. పేరు మరియు ఫోన్ నంబర్ ఫారమ్‌లో నింపాను."
+GOAL = "Complete the scholarship application forms and reach the review page."
+REPLY_DONE = "అప్లికేషన్ వివరాలు నింపి, రివ్యూ పేజీకి చేరుకున్నాను."
+REPLY_FAILED = "క్షమించండి, పనిని పూర్తి చేయలేకపోయాను. సహాయం అవసరం."
 REPLY_EMPTY = "క్షమించండి, వినిపించలేదు. మళ్ళీ చెప్పండి."
 
 
@@ -83,8 +85,19 @@ async def _run_command(session: dict, audio_path: Path | None, text: str | None)
             await _speak_reply(session, REPLY_EMPTY)
         else:
             session["status"] = "running"
-            await run_application_flow(trace_id, live_dir=session["dir"], on_step=session["steps"].append)
-            await _speak_reply(session, REPLY_DONE)
+            result = await run_agent_goal(
+                GOAL,
+                trace_id=trace_id,
+                start_url=f"{config.PORTAL_URL}/login",
+                success_url="/review",
+                live_dir=session["dir"],
+                on_step=session["steps"].append,
+            )
+            if result["success"]:
+                await _speak_reply(session, REPLY_DONE)
+            else:
+                events.log_event(trace_id, "agent.not_done", stop_reason=result["stop_reason"])
+                await _speak_reply(session, REPLY_FAILED)
 
         session["status"] = "done"
         session["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")

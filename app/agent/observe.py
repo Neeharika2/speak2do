@@ -30,8 +30,14 @@ OBSERVE_JS = """
     return (el.textContent || el.value || '').trim().replace(/\\s+/g, ' ').slice(0, 80);
   };
   const nodes = Array.from(document.querySelectorAll('a, button, input, select, textarea')).filter(visible);
-  const elements = nodes.slice(0, 60).map((el, index) => {
-    el.setAttribute('data-agent-id', String(index + 1));
+  let seq = window.__agentIdSeq || 0;
+  const elements = nodes.slice(0, 60).map((el) => {
+    let id = el.getAttribute('data-agent-id');
+    if (!id) {
+      seq += 1;
+      id = String(seq);
+      el.setAttribute('data-agent-id', id);
+    }
     let value = '';
     if (el.tagName === 'SELECT') {
       value = el.options[el.selectedIndex] ? el.options[el.selectedIndex].text.trim() : '';
@@ -43,7 +49,7 @@ OBSERVE_JS = """
     const label = labelOf(el).slice(0, 60);
     if (el.type === 'password' || /otp/i.test(label)) value = value ? '[REDACTED]' : '';
     return {
-      id: index + 1,
+      id: parseInt(id, 10),
       tag: el.tagName.toLowerCase(),
       type: el.type || '',
       role: el.getAttribute('role') || el.tagName.toLowerCase(),
@@ -52,6 +58,7 @@ OBSERVE_JS = """
       disabled: !!el.disabled,
     };
   }).filter((el) => !el.disabled);
+  window.__agentIdSeq = seq;
   const headingEl = document.querySelector('h1');
   return {
     path: location.pathname,

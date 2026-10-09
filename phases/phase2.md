@@ -1,6 +1,6 @@
 # Phase 2 — M1: Walking Skeleton + Voice App
 
-**Window:** Mon 12 – Thu 15 Oct 2026 (started early: Fri 9 Oct) · **Status:** 🟡 In progress — click-through handoff remaining
+**Window:** Mon 12 – Thu 15 Oct 2026 (started early: Fri 9 Oct) · **Status:** ✅ Backend + voice app verified — **live-view click-through carried into the M4 handoff work** (plan §5 says handoff finishes in M4)
 **Plan reference:** `voice_first_agent_plan_v4.md` §3 (architecture), §5 (handoff)
 
 ## Goal (from the plan)

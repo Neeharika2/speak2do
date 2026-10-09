@@ -14,14 +14,17 @@ app/
   events.py          trace_id event log -> data/task_events.jsonl
   voice/             Gnani STT (transcribe) + TTS (speak) adapters
   policy/            deterministic policy engine (M1: pass-through)
-  agent/             Jev (TypeSafe System One) client + demo_flow (login/form fill)
+  agent/             Jev client + demo_flow (M1 flow) + loop (M2 Jev-driven agent) + values/llm/observe
   browser/           Playwright controller (only module touching the browser)
   api/               voice app API (push-to-talk, session state, live view)
   templates/         assistant.html (the voice app page)
-  portal/            mock scholarship portal (M1 slice: login/OTP/dashboard/form-1)
+  portal/            mock scholarship portal (full app flow + hostile toggles)
 scripts/
   walking_skeleton.py   M1 smoke test: voice -> login -> form fill -> confirmation
   ui_smoke.py           UI smoke: text fallback -> agent flow -> live view + audio
+  hostile_check.py      M2: hostile toggles + submit dup handling (14 checks)
+  agent_guards.py       M2: forced-loop / budgets / cost cap / no-progress (4 checks)
+  agent_measure.py      M2 gate: 10 runs to review + median step time report
 spikes/
   stt_spike.py          M0 STT spike runner (5 recorded phrases)
   phrases.md            what to record + expected entities
@@ -46,9 +49,10 @@ cp .env.example .env                           # then fill in the three API keys
 ```
 
 - **Voice assistant (front door):** http://127.0.0.1:8765/ → **hold** the "Hold to talk"
-  button and speak in Telugu (e.g. "Scholarship application login cheyyi"), or **quick-tap**
-  it for hands-free mode (tap again to send). There is also a text fallback. You'll see the
-  transcript, the live browser view, the agent's steps, and hear a spoken reply.
+  button and speak in Telugu (e.g. "Scholarship application cheyyi"), or **quick-tap**
+  it for hands-free mode (tap again to send). The Jev-driven agent logs in and fills the
+  whole application to the review page while you watch the live view; you'll hear a Telugu
+  reply. There is also a text fallback.
 - **Mock portal (the agent's practice target):** http://127.0.0.1:8765/portal/login
   (demo_user / demo_pass_123, OTP 246810). You normally don't need to open this — the
   agent drives it while you watch the live view.
@@ -56,18 +60,27 @@ cp .env.example .env                           # then fill in the three API keys
 The browser asks for microphone permission on first use; allow it. Both pages are local
 (`127.0.0.1`), which counts as a secure context, so the mic works without HTTPS.
 
-## Smoke tests
+## Smoke tests and milestone checks
 
 With the server running:
 
 ```bash
-.venv/bin/python scripts/walking_skeleton.py   # CLI: voice -> login -> form fill -> reply
-.venv/bin/python scripts/ui_smoke.py           # UI: text fallback -> live view + audio
+.venv/bin/python scripts/walking_skeleton.py       # M1: voice -> login -> form fill -> reply
+.venv/bin/python scripts/ui_smoke.py               # M1: text fallback -> live view + audio
+.venv/bin/python scripts/hostile_check.py          # M2: hostile toggles (14 checks)
+.venv/bin/python scripts/agent_guards.py           # M2: budgets/no-progress guards (4 checks)
+.venv/bin/python scripts/agent_measure.py --runs 10 # M2 gate: >= 8/10 reach review
 ```
 
 `walking_skeleton.py` synthesizes a Telugu command, transcribes it, drives the login +
 OTP + dashboard + form-1 (fills name and phone), verifies the fields, saves a screenshot,
 and speaks a confirmation. All stages share one `trace_id` in `data/task_events.jsonl`.
+
+`agent_measure.py` runs the full Jev-driven agent (login → forms 1/2/3 → review) N times
+and writes a report to `data/agent_measure_<ts>.json` (pass rate, median step time).
+
+> Non-default ports: start the server with `BASE_URL=http://127.0.0.1:<port>` so the
+> agent inside the server hits the same instance.
 
 ## STT spike (M0)
 

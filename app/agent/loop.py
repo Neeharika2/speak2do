@@ -52,6 +52,45 @@ def _element_summary(element: dict) -> str:
     return base
 
 
+def _is_empty_field(element: dict) -> bool:
+    tag, etype, value = element["tag"], element["type"], element["value"]
+    if tag == "select":
+        return value in ("", "Select")
+    if tag in ("input", "textarea"):
+        return etype not in ("checkbox", "radio", "submit", "button") and value == ""
+    return False
+
+
+def _target_candidates(candidates: list[dict]) -> list[dict]:
+    """Bounded action set (plan §3): remove hidden/disabled/incompatible and premature targets.
+
+    While empty fields exist, offer only those (fill before submit); afterwards offer
+    clickable elements (links, buttons, checkboxes).
+    """
+    empty_fields = [e for e in candidates if _is_empty_field(e)]
+    if empty_fields:
+        return empty_fields
+    return [
+        e
+        for e in candidates
+        if e["tag"] in ("a", "button") or e["type"] in ("checkbox", "radio", "submit", "button")
+    ]
+
+
+def _normalize_operation(element: dict, operation: str) -> str:
+    """Map a model-chosen operation to the primitive the element actually supports."""
+    if operation in ("wait", "done", "blocked"):
+        return operation
+    tag, etype = element["tag"], element["type"]
+    if tag == "select":
+        return "select"
+    if tag in ("a", "button") or etype in ("checkbox", "radio", "submit", "button"):
+        return "click"
+    if tag in ("input", "textarea"):
+        return "type"
+    return operation
+
+
 def _signature(obs: dict) -> str:
     parts = [obs["path"]]
     for element in obs["elements"][:18]:
@@ -61,14 +100,15 @@ def _signature(obs: dict) -> str:
 
 async def _decide(goal: str, obs: dict, recent: list[str]) -> tuple[dict, int]:
     candidates = obs["elements"][:18]
-    if not candidates:
+    targets = _target_candidates(candidates)[:18]
+    if not targets:
         return {"operation": "blocked", "target": None}, 0
     questions: dict = {"operation": OPERATION_QUESTION}
-    if len(candidates) >= 2:
+    if len(targets) >= 2:
         questions["target"] = {
             "type": "choice",
             "instructions": "If click/type/select was chosen, pick the target element id.",
-            "criteria": {str(e["id"]): _element_summary(e) for e in candidates},
+            "criteria": {str(e["id"]): _element_summary(e) for e in targets},
         }
     state = {
         "goal": goal,
@@ -84,8 +124,8 @@ async def _decide(goal: str, obs: dict, recent: list[str]) -> tuple[dict, int]:
     answers = data.get("answers", {}) or {}
     operation = (answers.get("operation") or {}).get("choice")
     target = (answers.get("target") or {}).get("choice")
-    if target is None and len(candidates) == 1:
-        target = str(candidates[0]["id"])
+    if target is None and len(targets) == 1:
+        target = str(targets[0]["id"])
     return {"operation": operation, "target": None if target is None else str(target)}, tokens
 
 
@@ -211,7 +251,9 @@ async def run_agent_goal(
                 stop_reason = "blocked"
                 break
             if operation == "done":
-                stop_reason = "done_claimed"
+                # Jev may answer "done" while the page is still navigating; re-check after a beat.
+                await asyncio.sleep(0.5)
+                stop_reason = "done" if goal_reached() else "done_claimed"
                 break
             if operation is None:
                 stop_reason, error = "decision_error", "no operation returned"
@@ -231,6 +273,8 @@ async def run_agent_goal(
                     break
                 continue
 
+            operation = _normalize_operation(element, operation)
+
             value = ""
             if operation in ("type", "select"):
                 mapped = values.mapped_value(element["label"], profile)
@@ -243,7 +287,14 @@ async def run_agent_goal(
                     except Exception:  # noqa: BLE001
                         value = ""
 
-            policy_decision = policy.decide({"kind": operation, "selector": element["label"], "value": value})
+            policy_decision = policy.decide(
+                {
+                    "kind": operation,
+                    "selector": element["label"],
+                    "value": "[REDACTED]" if values.is_secret(element["label"]) else value,
+                    "has_value": bool(value),
+                }
+            )
             if policy_decision.verdict != policy.ALLOW:
                 stop_reason = f"policy_{policy_decision.verdict}"
                 break
