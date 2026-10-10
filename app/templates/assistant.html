@@ -84,12 +84,15 @@
       let autoStopTimer = null;
       let currentSession = null;
       let pollTimer = null;
+      let sessionState = null;
+      let lastSpeechId = 0;
 
       const STATUS_TEXT = {
         queued: "Thinking…",
         transcribing: "Listening…",
         running: "Working — watch the live view",
         speaking: "Replying…",
+        awaiting: "Waiting for your answer — hold to talk (say “Aagu” to stop)",
         done: "Done",
         error: "Something went wrong",
       };
@@ -202,19 +205,27 @@
         await uploadCommand(wav);
       }
 
+      function inputEndpoint() {
+        if (sessionState && sessionState.awaiting_input) return "/api/voice/answer";
+        const active = sessionState && ["queued", "transcribing", "running", "speaking", "awaiting"].includes(sessionState.status);
+        if (active) return "/api/voice/interrupt";
+        return "/api/voice/command";
+      }
+
       async function uploadCommand(wavBlob) {
-        setStatus("Thinking…", "queued");
+        const endpoint = inputEndpoint();
+        setStatus(endpoint === "/api/voice/interrupt" ? "Sending…" : "Thinking…", "queued");
         const form = new FormData();
         form.append("audio", wavBlob, "command.wav");
         try {
-          const response = await fetch("/api/voice/command", { method: "POST", body: form });
+          const response = await fetch(endpoint, { method: "POST", body: form });
           if (!response.ok) {
             const detail = await response.json().catch(() => ({}));
             setStatus(detail.detail || "Upload failed.", "error");
             return;
           }
           const data = await response.json();
-          startPolling(data.session_id);
+          if (endpoint === "/api/voice/command") startPolling(data.session_id);
         } catch (err) {
           setStatus("Upload failed: " + err.message, "error");
         }
@@ -223,18 +234,20 @@
       async function sendText() {
         const text = textInput.value.trim();
         if (!text) return;
-        setStatus("Thinking…", "queued");
+        const endpoint = inputEndpoint();
+        setStatus(endpoint === "/api/voice/interrupt" ? "Sending…" : "Thinking…", "queued");
         const form = new FormData();
         form.append("text", text);
         try {
-          const response = await fetch("/api/voice/text", { method: "POST", body: form });
+          const response = await fetch(endpoint, { method: "POST", body: form });
           if (!response.ok) {
             const detail = await response.json().catch(() => ({}));
             setStatus(detail.detail || "Request failed.", "error");
             return;
           }
           const data = await response.json();
-          startPolling(data.session_id);
+          if (endpoint === "/api/voice/command") startPolling(data.session_id);
+          textInput.value = "";
         } catch (err) {
           setStatus("Request failed: " + err.message, "error");
         }
@@ -242,6 +255,8 @@
 
       function startPolling(sessionId) {
         currentSession = sessionId;
+        sessionState = null;
+        lastSpeechId = 0;
         replyEl.textContent = "";
         stepsEl.innerHTML = "";
         if (pollTimer) clearInterval(pollTimer);
@@ -255,9 +270,18 @@
           const response = await fetch(`/api/voice/session/${currentSession}`);
           if (!response.ok) return;
           const data = await response.json();
+          sessionState = data;
           setStatus(STATUS_TEXT[data.status] || data.status, data.status);
           transcriptEl.textContent = data.transcript || "—";
-          replyEl.textContent = data.reply_text || data.error || "—";
+          const showReply = data.status === "done" || data.status === "speaking" || data.status === "error";
+          replyEl.textContent = showReply
+            ? data.reply_text || data.error || "—"
+            : data.prompt_text || data.reply_text || "—";
+          if (data.speech_id && data.speech_id !== lastSpeechId) {
+            lastSpeechId = data.speech_id;
+            audioEl.src = `/api/voice/session/${currentSession}/speech?ts=${Date.now()}`;
+            audioEl.play().catch(() => {});
+          }
           stepsEl.innerHTML = data.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
           if (data.status === "running" || data.status === "speaking" || data.status === "done") {
             liveImg.src = `/api/voice/session/${currentSession}/screenshot?ts=${Date.now()}`;

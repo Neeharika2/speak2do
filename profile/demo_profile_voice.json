@@ -1,0 +1,16 @@
+{
+  "full_name": "Ravi Kumar",
+  "dob": "2005-03-12",
+  "gender": "Male",
+  "phone": "9876543210",
+  "email": "ravi.kumar@example.com",
+  "college": "Govt Junior College, Guntur",
+  "course": "Intermediate",
+  "year": "2nd",
+  "marks": 78,
+  "address": "2-14, Gandhi Road",
+  "city": "Guntur",
+  "state": "Andhra Pradesh",
+  "district": "",
+  "pin": "522002"
+}

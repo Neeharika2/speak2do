@@ -17,9 +17,15 @@ from typing import Callable
 from app import config, events, policy
 from app.agent import jev_client, llm, values
 from app.agent.observe import observe_page
+from app.agent.voice_ux import HandoffError, StopRequested
 from app.browser.controller import BrowserController
 
 PROFILE_PATH = config.REPO_ROOT / "profile" / "demo_profile.json"
+
+
+def _profile_path() -> Path:
+    path = Path(config.AGENT_PROFILE)
+    return path if path.is_absolute() else config.REPO_ROOT / path
 
 OPERATION_QUESTION = {
     "type": "choice",
@@ -179,10 +185,12 @@ async def run_agent_goal(
     live_dir: Path | None = None,
     headless: bool = True,
     on_step: Callable[[str], None] | None = None,
+    voice_io: object | None = None,
+    stop_check: Callable[[], bool] | None = None,
 ) -> dict:
     """Run the observe/decide/act loop until success or a budget/guard stops it."""
     started = time.monotonic()
-    profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    profile = json.loads(_profile_path().read_text(encoding="utf-8"))
     browser = BrowserController(headless=headless)
     await browser.start()
 
@@ -206,6 +214,9 @@ async def run_agent_goal(
         events.log_event(trace_id, "agent.start", goal=goal, start_url=start_url, success_url=success_url)
 
         while True:
+            if stop_check and stop_check():
+                stop_reason = "user_stop"
+                break
             if goal_reached():
                 stop_reason = "done"
                 break
@@ -229,6 +240,9 @@ async def run_agent_goal(
             if goal_reached():
                 stop_reason = "done"
                 break
+
+            if voice_io is not None:
+                await voice_io.on_page(obs["path"])
 
             signature = _signature(obs)
             stall = stall + 1 if signature == last_signature else 0
@@ -261,7 +275,10 @@ async def run_agent_goal(
             if operation == "wait":
                 actions.append(f"wait ({obs['path']})")
                 step_durations.append(round(time.perf_counter() - step_started, 2))
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
+                if stop_check and stop_check():
+                    stop_reason = "user_stop"
+                    break
                 continue
 
             element = next((e for e in obs["elements"] if str(e["id"]) == str(target)), None)
@@ -278,8 +295,24 @@ async def run_agent_goal(
             value = ""
             if operation in ("type", "select"):
                 mapped = values.mapped_value(element["label"], profile)
-                if mapped is not None:
+                if mapped is not None and str(mapped).strip():
                     value = mapped
+                elif voice_io is not None:
+                    try:
+                        options: list[str] = []
+                        if element["tag"] == "select" and browser.page is not None:
+                            options = await browser.page.locator(
+                                f'[data-agent-id="{element["id"]}"]'
+                            ).evaluate(
+                                "el => Array.from(el.options).map(o => o.text.trim()).filter(t => t && t !== 'Select')"
+                            )
+                        value = await voice_io.ask_field(element["label"], options)
+                    except StopRequested:
+                        stop_reason = "user_stop"
+                        break
+                    except HandoffError as exc:
+                        stop_reason, error = "handoff", str(exc)
+                        break
                 elif llm_calls < max_llm_calls:
                     llm_calls += 1
                     try:
@@ -298,6 +331,19 @@ async def run_agent_goal(
             if policy_decision.verdict != policy.ALLOW:
                 stop_reason = f"policy_{policy_decision.verdict}"
                 break
+
+            if stop_check and stop_check():
+                stop_reason = "user_stop"
+                break
+            if voice_io is not None:
+                try:
+                    await voice_io.before_action(element, obs, profile)
+                except StopRequested:
+                    stop_reason = "user_stop"
+                    break
+                except HandoffError as exc:
+                    stop_reason, error = "handoff", str(exc)
+                    break
 
             label = f"{operation} {element['label']!r}"
             if value:

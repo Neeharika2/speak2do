@@ -14,22 +14,26 @@ app/
   events.py          trace_id event log -> data/task_events.jsonl
   voice/             Gnani STT (transcribe) + TTS (speak) adapters
   policy/            deterministic policy engine (M1: pass-through)
-  agent/             Jev client + demo_flow (M1 flow) + loop (M2 Jev-driven agent) + values/llm/observe
+  agent/             Jev client, loop, observe/values/llm + readback/voice_ux (M3 voice UX)
   browser/           Playwright controller (only module touching the browser)
-  api/               voice app API (push-to-talk, session state, live view)
+  api/               voice app API (push-to-talk, sessions, answers, stop, live view)
   templates/         assistant.html (the voice app page)
   portal/            mock scholarship portal (full app flow + hostile toggles)
 scripts/
   walking_skeleton.py   M1 smoke test: voice -> login -> form fill -> confirmation
-  ui_smoke.py           UI smoke: text fallback -> agent flow -> live view + audio
+  ui_smoke.py           M1/M3 UI smoke: text fallback -> interactive agent -> live view + audio
   hostile_check.py      M2: hostile toggles + submit dup handling (14 checks)
   agent_guards.py       M2: forced-loop / budgets / cost cap / no-progress (4 checks)
   agent_measure.py      M2 gate: 10 runs to review + median step time report
+  voice_ux_check.py     M3: read-back / yes-no / stop / glossary checks (14, offline)
+  voice_accuracy.py     M3 gate: 30-phrase TTS->STT accuracy + read-back simulation
+  voice_session_check.py M3: missing-field Q&A + "Aagu" halt latency (9 checks)
 spikes/
   stt_spike.py          M0 STT spike runner (5 recorded phrases)
   phrases.md            what to record + expected entities
   RECORDING_GUIDE.md    how to record and run
 profile/demo_profile.json   synthetic profile used by the agent
+profile/demo_profile_voice.json  voice-demo profile (district blank -> agent asks by voice)
 phases/               phase-by-phase build log (phase1.md = M0, phase2.md = M1, ...)
 ```
 
@@ -50,9 +54,12 @@ cp .env.example .env                           # then fill in the three API keys
 
 - **Voice assistant (front door):** http://127.0.0.1:8765/ → **hold** the "Hold to talk"
   button and speak in Telugu (e.g. "Scholarship application cheyyi"), or **quick-tap**
-  it for hands-free mode (tap again to send). The Jev-driven agent logs in and fills the
-  whole application to the review page while you watch the live view; you'll hear a Telugu
-  reply. There is also a text fallback.
+  it for hands-free mode (tap again to send). The Jev-driven agent logs in, fills the
+  whole application, **asks you to confirm name and phone, and asks for missing values
+  by voice** (reading the options aloud). Say **"ఆగు"** to stop at any time. There is
+  also a text fallback.
+- **Missing-field demo:** start the server with
+  `AGENT_PROFILE=profile/demo_profile_voice.json` (district is blank → the agent asks).
 - **Mock portal (the agent's practice target):** http://127.0.0.1:8765/portal/login
   (demo_user / demo_pass_123, OTP 246810). You normally don't need to open this — the
   agent drives it while you watch the live view.
@@ -66,10 +73,13 @@ With the server running:
 
 ```bash
 .venv/bin/python scripts/walking_skeleton.py       # M1: voice -> login -> form fill -> reply
-.venv/bin/python scripts/ui_smoke.py               # M1: text fallback -> live view + audio
+.venv/bin/python scripts/ui_smoke.py               # M1/M3: interactive UI -> live view + audio
 .venv/bin/python scripts/hostile_check.py          # M2: hostile toggles (14 checks)
 .venv/bin/python scripts/agent_guards.py           # M2: budgets/no-progress guards (4 checks)
 .venv/bin/python scripts/agent_measure.py --runs 10 # M2 gate: >= 8/10 reach review
+.venv/bin/python scripts/voice_ux_check.py         # M3: read-back/parsing checks (offline)
+.venv/bin/python scripts/voice_accuracy.py         # M3 gate: 30-phrase accuracy (>= 90%)
+BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_session_check.py  # M3: Q&A + Aagu
 ```
 
 `walking_skeleton.py` synthesizes a Telugu command, transcribes it, drives the login +

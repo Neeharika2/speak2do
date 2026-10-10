@@ -1,0 +1,36 @@
+[
+  {"id": 1, "type": "name", "text": "నా పేరు రవి కుమార్.", "expected": "రవి కుమార్", "match": "fuzzy"},
+  {"id": 2, "type": "name", "text": "నా పేరు సీతా దేవి.", "expected": "సీతా దేవి", "match": "fuzzy"},
+  {"id": 3, "type": "name", "text": "నా పేరు అర్జున్ రెడ్డి.", "expected": "అర్జున్ రెడ్డి", "match": "fuzzy"},
+  {"id": 4, "type": "name", "text": "నా పేరు లక్ష్మి ప్రసన్న.", "expected": "లక్ష్మి ప్రసన్న", "match": "fuzzy"},
+  {"id": 5, "type": "name", "text": "నా పేరు వెంకటేష్.", "expected": "వెంకటేష్", "match": "fuzzy"},
+  {"id": 6, "type": "name", "text": "నా పేరు అనసూయ.", "expected": "అనసూయ", "match": "fuzzy"},
+  {"id": 7, "type": "name", "text": "నా పేరు హరి ప్రసాద్.", "expected": "హరి ప్రసాద్", "match": "fuzzy"},
+  {"id": 8, "type": "name", "text": "నా పేరు దీపికా శర్మ.", "expected": "దీపికా శర్మ", "match": "fuzzy"},
+
+  {"id": 9, "type": "digits", "text": "నా ఫోన్ నంబర్ 9876543210.", "expected": "9876543210", "match": "digits"},
+  {"id": 10, "type": "digits", "text": "నా ఫోన్ నంబర్ 246810.", "expected": "246810", "match": "digits"},
+  {"id": 11, "type": "digits", "text": "నా ఫోన్ నంబర్ 6301234567.", "expected": "6301234567", "match": "digits"},
+  {"id": 12, "type": "digits", "text": "నా ఫోన్ నంబర్ 9000012345.", "expected": "9000012345", "match": "digits"},
+  {"id": 13, "type": "digits", "text": "నా ఫోన్ నంబర్ 1234567890.", "expected": "1234567890", "match": "digits"},
+  {"id": 14, "type": "digits", "text": "నా ఫోన్ నంబర్ 8712345609.", "expected": "8712345609", "match": "digits"},
+  {"id": 15, "type": "digits", "text": "నా ఓటీపీ 444777.", "expected": "444777", "match": "digits"},
+  {"id": 16, "type": "digits", "text": "నా పిన్ కోడ్ 522002.", "expected": "522002", "match": "digits"},
+
+  {"id": 17, "type": "district", "text": "మా జిల్లా గుంటూరు.", "expected": "Guntur", "match": "alias"},
+  {"id": 18, "type": "district", "text": "మా జిల్లా కృష్ణా.", "expected": "Krishna", "match": "alias"},
+  {"id": 19, "type": "district", "text": "మా జిల్లా కర్నూలు.", "expected": "Kurnool", "match": "alias"},
+  {"id": 20, "type": "district", "text": "మా జిల్లా విశాఖపట్నం.", "expected": "Visakhapatnam", "match": "alias"},
+  {"id": 21, "type": "district", "text": "మా ఊరు హైదరాబాద్.", "expected": "Hyderabad", "match": "alias"},
+  {"id": 22, "type": "district", "text": "మా ఊరు వరంగల్.", "expected": "Warangal", "match": "alias"},
+
+  {"id": 23, "type": "answer", "text": "అవును.", "expected": "yes", "match": "yes"},
+  {"id": 24, "type": "answer", "text": "కాదు.", "expected": "no", "match": "no"},
+  {"id": 25, "type": "answer", "text": "సరే.", "expected": "yes", "match": "yes"},
+  {"id": 26, "type": "answer", "text": "లేదు.", "expected": "no", "match": "no"},
+
+  {"id": 27, "type": "stop", "text": "ఆగు.", "expected": "stop", "match": "stop"},
+  {"id": 28, "type": "stop", "text": "దయచేసి ఆపండి.", "expected": "stop", "match": "stop"},
+  {"id": 29, "type": "command", "text": "Scholarship application చేయండి.", "expected": ["స్కాలర్షిప్", "అప్లికేషన్", "scholarship", "application"], "match": "contains"},
+  {"id": 30, "type": "command", "text": "Application submit చేయండి.", "expected": ["అప్లికేషన్", "application"], "match": "contains"}
+]

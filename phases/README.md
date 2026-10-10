@@ -10,7 +10,7 @@ The plan (`voice_first_agent_plan_v4.md`) says what *should* be built; these fil
 | 1 | M0 — Access, spikes, specs | Fri 9 – Sun 11 Oct | ✅ Complete (2 human items carried) |
 | 2 | M1 — Walking skeleton + voice app | Mon 12 – Thu 15 Oct (started early) | ✅ Backend + voice app verified · click-through carried to M4 |
 | 3 | M2 — Agent loop + Jev + full portal | Fri 16 – Wed 21 Oct (done early Fri 9 Oct) | ✅ Complete — gate 10/10, median step 0.70 s |
-| 4 | M3 — Voice UX in Telugu | Thu 22 – Mon 26 Oct | ⬜ Not started |
+| 4 | M3 — Voice UX in Telugu | Thu 22 – Mon 26 Oct (done early Sat 10 Oct) | ✅ Complete — gate 97%, Aagu halt 0.11 s |
 | 5 | M4 — Safety, handoff, idempotency | Tue 27 – Fri 30 Oct | ⬜ Not started |
 | 6 | M5 — P0 complete: full application | Sat 31 Oct – Tue 3 Nov | ⬜ Not started |
 | 7 | M6 — P1 conditional: documents + replay + freeze | Wed 4 – Fri 6 Nov | ⬜ Not started |
