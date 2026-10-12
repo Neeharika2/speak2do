@@ -42,6 +42,14 @@ DEFAULT_VOICE = os.environ.get("AGENT_VOICE", "Varuni")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 AGENT_PROFILE = os.environ.get("AGENT_PROFILE", "profile/demo_profile.json")
 
+# Task definition (change here, not in the API module)
+AGENT_GOAL = os.environ.get(
+    "AGENT_GOAL", "Complete the scholarship application forms and reach the review page."
+)
+AGENT_START_PATH = os.environ.get("AGENT_START_PATH", "/login")
+AGENT_SUCCESS_PATH = os.environ.get("AGENT_SUCCESS_PATH", "/review")
+AGENT_DOMAIN = os.environ.get("AGENT_DOMAIN", "scholarship application")
+
 # Mock portal (demo values, not secrets)
 PORTAL_TEST_USER = os.environ.get("PORTAL_TEST_USER", "demo_user")
 PORTAL_TEST_PASSWORD = os.environ.get("PORTAL_TEST_PASSWORD", "demo_pass_123")

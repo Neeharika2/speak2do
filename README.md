@@ -25,9 +25,9 @@ scripts/
   hostile_check.py      M2: hostile toggles + submit dup handling (14 checks)
   agent_guards.py       M2: forced-loop / budgets / cost cap / no-progress (4 checks)
   agent_measure.py      M2 gate: 10 runs to review + median step time report
-  voice_ux_check.py     M3: read-back / yes-no / stop / glossary checks (14, offline)
+  voice_ux_check.py     M3: read-back / parsing / corrections / intent checks (23, offline)
   voice_accuracy.py     M3 gate: 30-phrase TTS->STT accuracy + read-back simulation
-  voice_session_check.py M3: missing-field Q&A + "Aagu" halt latency (9 checks)
+  voice_session_check.py M3: Q&A, corrections, intent gate, "Aagu" halt (16 checks)
 spikes/
   stt_spike.py          M0 STT spike runner (5 recorded phrases)
   phrases.md            what to record + expected entities
@@ -56,7 +56,9 @@ cp .env.example .env                           # then fill in the three API keys
   button and speak in Telugu (e.g. "Scholarship application cheyyi"), or **quick-tap**
   it for hands-free mode (tap again to send). The Jev-driven agent logs in, fills the
   whole application, **asks you to confirm name and phone, and asks for missing values
-  by voice** (reading the options aloud). Say **"ఆగు"** to stop at any time. There is
+  by voice** (reading the options aloud). Correct it any time: "నా నంబర్ మారింది" makes
+  it ask for the new number and **re-read it back**; unrelated commands get a
+  clarification instead of running the task. Say **"ఆగు"** to stop at any time. There is
   also a text fallback.
 - **Missing-field demo:** start the server with
   `AGENT_PROFILE=profile/demo_profile_voice.json` (district is blank → the agent asks).

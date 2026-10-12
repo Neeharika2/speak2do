@@ -16,7 +16,7 @@ async def suggest_value(label: str, page_path: str, profile: dict) -> str:
     if not config.GEMINI_API_KEY:
         return ""
     prompt = (
-        "You are filling a scholarship application form.\n"
+        f"You are filling a {config.AGENT_DOMAIN} form.\n"
         f"Field label: {label}\nPage: {page_path}\n"
         f"Known profile: {json.dumps(profile, ensure_ascii=False)}\n"
         "Reply with ONLY the value to type, no quotes, no explanation."

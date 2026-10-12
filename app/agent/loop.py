@@ -43,6 +43,11 @@ OPERATION_QUESTION = {
     },
 }
 
+MAX_TARGETS = 18           # elements offered to Jev per step (choice criteria cap is 20)
+STALL_LIMIT = 4            # identical page states before no_progress
+ERROR_STREAK_LIMIT = 3     # consecutive action errors before stopping
+REPEATED_ACTION_LIMIT = 3  # identical actions in a row before no_progress
+
 
 def _element_summary(element: dict) -> str:
     base = f'{element["role"]} "{element["label"]}"'
@@ -99,14 +104,14 @@ def _normalize_operation(element: dict, operation: str) -> str:
 
 def _signature(obs: dict) -> str:
     parts = [obs["path"]]
-    for element in obs["elements"][:18]:
+    for element in obs["elements"][:MAX_TARGETS]:
         parts.append(f"{element['label']}|{element['value']}")
     return hashlib.md5("||".join(parts).encode()).hexdigest()
 
 
 async def _decide(goal: str, obs: dict, recent: list[str]) -> tuple[dict, int]:
-    candidates = obs["elements"][:18]
-    targets = _target_candidates(candidates)[:18]
+    candidates = obs["elements"][:MAX_TARGETS]
+    targets = _target_candidates(candidates)[:MAX_TARGETS]
     if not targets:
         return {"operation": "blocked", "target": None}, 0
     questions: dict = {"operation": OPERATION_QUESTION}
@@ -171,6 +176,29 @@ async def _perform(browser: BrowserController, element: dict, operation: str, va
         raise ValueError(f"unsupported operation: {operation}")
 
 
+async def _apply_overrides(browser: BrowserController, trace_id: str, obs: dict, overrides: dict) -> None:
+    """Re-fill fields on the current page whose value was corrected by voice."""
+    if not overrides:
+        return
+    for element in obs["elements"]:
+        key = values.label_key(element["label"])
+        if key is None or key not in overrides:
+            continue
+        wanted = str(overrides[key] or "").strip()
+        if not wanted:
+            continue
+        if str(element.get("value") or "").strip() == wanted:
+            continue
+        operation = _normalize_operation(element, "type")
+        if operation not in ("type", "select"):
+            continue
+        try:
+            await _perform(browser, element, operation, wanted)
+            events.log_event(trace_id, "agent.override_applied", field=key, label=element["label"])
+        except Exception as exc:  # noqa: BLE001
+            events.log_event(trace_id, "agent.override_error", field=key, error=str(exc))
+
+
 async def run_agent_goal(
     goal: str,
     *,
@@ -182,15 +210,29 @@ async def run_agent_goal(
     max_retries: int = 2,
     max_tokens: int = 60_000,
     max_llm_calls: int = 15,
+    stall_limit: int = STALL_LIMIT,
+    error_limit: int = ERROR_STREAK_LIMIT,
     live_dir: Path | None = None,
     headless: bool = True,
     on_step: Callable[[str], None] | None = None,
     voice_io: object | None = None,
     stop_check: Callable[[], bool] | None = None,
+    profile_overrides: Callable[[], dict] | None = None,
 ) -> dict:
     """Run the observe/decide/act loop until success or a budget/guard stops it."""
     started = time.monotonic()
-    profile = json.loads(_profile_path().read_text(encoding="utf-8"))
+    base_profile = json.loads(_profile_path().read_text(encoding="utf-8"))
+
+    def current_profile() -> dict:
+        if profile_overrides is None:
+            return base_profile
+        try:
+            overrides = profile_overrides() or {}
+        except Exception:  # noqa: BLE001
+            overrides = {}
+        merged = dict(base_profile)
+        merged.update(overrides)
+        return merged
     browser = BrowserController(headless=headless)
     await browser.start()
 
@@ -247,7 +289,7 @@ async def run_agent_goal(
             signature = _signature(obs)
             stall = stall + 1 if signature == last_signature else 0
             last_signature = signature
-            if stall >= 4:
+            if stall >= stall_limit:
                 stop_reason = "no_progress"
                 break
 
@@ -285,7 +327,7 @@ async def run_agent_goal(
             if element is None:
                 actions.append(f"{operation} ? (stale target {target})")
                 consecutive_errors += 1
-                if consecutive_errors >= 3:
+                if consecutive_errors >= error_limit:
                     stop_reason = "action_errors"
                     break
                 continue
@@ -294,7 +336,7 @@ async def run_agent_goal(
 
             value = ""
             if operation in ("type", "select"):
-                mapped = values.mapped_value(element["label"], profile)
+                mapped = values.mapped_value(element["label"], current_profile())
                 if mapped is not None and str(mapped).strip():
                     value = mapped
                 elif voice_io is not None:
@@ -316,7 +358,7 @@ async def run_agent_goal(
                 elif llm_calls < max_llm_calls:
                     llm_calls += 1
                     try:
-                        value = await llm.suggest_value(element["label"], obs["path"], profile)
+                        value = await llm.suggest_value(element["label"], obs["path"], current_profile())
                     except Exception:  # noqa: BLE001
                         value = ""
 
@@ -337,13 +379,18 @@ async def run_agent_goal(
                 break
             if voice_io is not None:
                 try:
-                    await voice_io.before_action(element, obs, profile)
+                    await voice_io.before_action(element, obs, current_profile())
                 except StopRequested:
                     stop_reason = "user_stop"
                     break
                 except HandoffError as exc:
                     stop_reason, error = "handoff", str(exc)
                     break
+            if profile_overrides is not None:
+                try:
+                    await _apply_overrides(browser, trace_id, obs, profile_overrides() or {})
+                except Exception as exc:  # noqa: BLE001
+                    events.log_event(trace_id, "agent.override_error", error=str(exc))
 
             label = f"{operation} {element['label']!r}"
             if value:
@@ -361,7 +408,7 @@ async def run_agent_goal(
             if action_error is not None:
                 consecutive_errors += 1
                 actions.append(f"{label} [failed: {action_error}]")
-                if consecutive_errors >= 3:
+                if consecutive_errors >= error_limit:
                     stop_reason = "action_errors"
                     break
                 continue
@@ -390,7 +437,7 @@ async def run_agent_goal(
                     await browser.screenshot(live_dir / "view.png")
                 except Exception:  # noqa: BLE001
                     pass
-            if len(actions) >= 3 and actions[-1] == actions[-2] == actions[-3]:
+            if len(actions) >= REPEATED_ACTION_LIMIT and actions[-1] == actions[-2] == actions[-3]:
                 stop_reason = "no_progress"
                 break
             await asyncio.sleep(0.15)

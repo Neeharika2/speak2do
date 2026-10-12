@@ -49,6 +49,15 @@ def mapped_value(label: str, profile: dict) -> str | None:
     return None
 
 
+def label_key(label: str) -> str | None:
+    """Reverse map: which profile key does this field label correspond to?"""
+    text = label.lower()
+    for keywords, key in MAPPINGS:
+        if any(word in text for word in keywords):
+            return key
+    return None
+
+
 def is_secret(label: str) -> bool:
     text = label.lower()
     return any(word in text for word in ("password", "one-time", "otp"))

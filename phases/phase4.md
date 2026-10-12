@@ -44,6 +44,32 @@ The one accuracy miss (`లక్ష్మి ప్రసన్న`) failed all
 - [x] Spoken progress at each major step (login, each form, review)
 - [x] "Repeat" support: "మళ్ళీ" re-speaks the active prompt
 
+## Post-review quick wins (Mon 12 Oct, external review)
+
+Applied the worthwhile items from the code review (and corrected one claim):
+
+1. **Task definition externalized** — `AGENT_GOAL`, `AGENT_START_PATH`, `AGENT_SUCCESS_PATH`, `AGENT_DOMAIN` live in `app/config.py`; the voice API, measure/guards scripts, and the Gemini fallback prompt read from config instead of inline strings. *(The review's claim that credentials are "hardcoded" was wrong: `PORTAL_TEST_*` are env-configurable, and their separation from the profile is intentional — plan §4.4.)*
+2. **Named guard limits** — `MAX_TARGETS`, `STALL_LIMIT`, `ERROR_STREAK_LIMIT`, `REPEATED_ACTION_LIMIT`, with `stall_limit`/`error_limit` exposed as `run_agent_goal` parameters.
+3. **Session is a dataclass** — the 20-key session dict is now `Session` (files, status, interactive channels), ahead of M4's bound-confirmation state.
+
+Verified after: compile ok · voice UX 14/14 · interactive session 9/9 · UI smoke PASS · guards 4/4 · agent runs 2/2 (median step 0.56 s) · 0 secret leaks.
+
+Deferred (noted, not rejected): extracting helpers from the 250-line `run_agent_goal` (better done after M4 rules land), JSON glossary for the readback aliases, and `demo_flow` removal (kept as the M1 regression path).
+
+## M3.5: voice corrections + intent gate (Sat 10 Oct, after user feedback)
+
+Reported: any phrase ran the same fixed task, and "నా నంబర్ మారింది" was ignored.
+
+- **Intent gate:** commands are checked for application/scholarship keywords (or a correction); unrelated speech gets a clarification reply and **no agent run**.
+- **Corrections by voice:** "నా నంబర్ మారింది" / "నా నంబర్ <digits>" / "నా పేరు <name>" / "జిల్లా <district>" are parsed (Telugu digit words, numerals, English digits; district glossary). Missing values trigger "కొత్త ఫోన్ నంబర్ చెప్పండి."; the value goes into a session overlay and the affected field is re-filled in the form.
+- **Read-back correction dialogue:** at the name/phone read-back, "కాదు" (or a direct correction) leads to "ఏది మార్చాలి?" → new value → re-read; up to 3 cycles, then safe handoff.
+- **Mid-task:** a correction said while the agent works updates the overlay and acks ("సరే, ఫోన్ నంబర్ నవీకరించాను."); the loop syncs changed fields before saving (`agent.override_applied` event).
+- **Loop:** `profile_overrides` callable merges session overrides per action; corrections are session-only and never written to the profile file (profile saving by voice remains a cut-list item).
+
+Verified: offline **23/23** (parse/glossary/intent); interactive **16/16** — read-back rejection → phone correction saved and re-read; command-time "నా నంబర్ మారింది" → asked → applied → reached review; unrelated command → clarify with zero steps; UI smoke PASS; guards 4/4; agent runs 2/2 (median step 0.53 s); "Aagu" halt 0.23 s; 0 secret leaks.
+
+Known limits: correction fields are phone, name, district (not DOB/email yet); corrections after a form is saved do not retroactively change that saved form (read-back is the natural moment); the intent gate is keyword-based, not full NLU.
+
 ## How to run
 
 ```bash

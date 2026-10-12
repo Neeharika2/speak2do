@@ -52,10 +52,10 @@ async def main() -> int:
         # 2. action budget — stops at the cap
         await client.post(f"{config.BASE_URL}/portal/__reset")
         budget = await run_agent_goal(
-            "Complete the scholarship application forms and reach the review page.",
+            config.AGENT_GOAL,
             trace_id=events.new_trace_id(),
-            start_url=f"{config.PORTAL_URL}/login",
-            success_url="/review",
+            start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
+            success_url=config.AGENT_SUCCESS_PATH,
             max_actions=3,
             max_seconds=60,
         )
@@ -68,10 +68,10 @@ async def main() -> int:
         # 3. token cost cap — halts after the first costly decision
         await client.post(f"{config.BASE_URL}/portal/__reset")
         cost = await run_agent_goal(
-            "Complete the scholarship application forms and reach the review page.",
+            config.AGENT_GOAL,
             trace_id=events.new_trace_id(),
-            start_url=f"{config.PORTAL_URL}/login",
-            success_url="/review",
+            start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
+            success_url=config.AGENT_SUCCESS_PATH,
             max_actions=50,
             max_seconds=60,
             max_tokens=1,
@@ -93,8 +93,8 @@ async def main() -> int:
         stalled = await run_agent_goal(
             "Reach the review page.",
             trace_id=events.new_trace_id(),
-            start_url=f"{config.PORTAL_URL}/login",
-            success_url="/review",
+            start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
+            success_url=config.AGENT_SUCCESS_PATH,
             max_actions=20,
             max_seconds=60,
         )

@@ -43,6 +43,20 @@ def main() -> int:
     check("repeat request detected", readback.is_repeat("మళ్ళీ చెప్పు"))
     check("non-repeat is not a repeat", not readback.is_repeat("అవును"))
 
+    check("digits parsed from Telugu words", readback.parse_digits("తొమ్మిది ఎనిమిది ఏడు") == "987")
+    check("digits parsed from numerals", readback.parse_digits("నంబర్ 987 అని") == "987")
+    check(
+        "phone correction with spoken digits",
+        readback.parse_correction("నా నంబర్ తొమ్మిది ఎనిమిది ఏడు ఆరు ఐదు సున్నా సున్నా సున్నా సున్నా సున్నా")
+        == ("phone", "9876500000"),
+    )
+    check("phone change without value -> asks for it", readback.parse_correction("నా ఫోన్ నంబర్ మారింది") == ("phone", None))
+    check("phone 'is fine' is not a correction", readback.parse_correction("ఫోన్ నంబర్ సరే") is None)
+    check("name correction parsed", readback.parse_correction("నా పేరు సీతా దేవి") == ("full_name", "సీతా దేవి"))
+    check("district correction parsed", readback.parse_correction("జిల్లా గుంటూరు") == ("district", "Guntur"))
+    check("application intent detected", readback.is_application_intent("Scholarship application చేయండి"))
+    check("unrelated speech is not application intent", not readback.is_application_intent("వాతావరణం ఎలా ఉంది"))
+
     check("district alias matched", readback.match_option("మా జిల్లా గుంటూరు", ["Guntur", "Krishna"]) == "Guntur")
     check("english option matched", readback.match_option("Krishna", ["Guntur", "Krishna"]) == "Krishna")
     check("unknown option -> None (re-ask)", readback.match_option("something else", ["Guntur", "Krishna"]) is None)

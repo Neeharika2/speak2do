@@ -26,7 +26,7 @@ import httpx
 from app import config, events
 from app.agent.loop import run_agent_goal
 
-GOAL = "Complete the scholarship application forms and reach the review page."
+GOAL = config.AGENT_GOAL
 
 
 async def main() -> int:
@@ -45,8 +45,8 @@ async def main() -> int:
             result = await run_agent_goal(
                 GOAL,
                 trace_id=trace_id,
-                start_url=f"{config.PORTAL_URL}/login",
-                success_url="/review",
+                start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
+                success_url=config.AGENT_SUCCESS_PATH,
                 max_actions=args.max_actions,
                 max_seconds=args.max_seconds,
             )
