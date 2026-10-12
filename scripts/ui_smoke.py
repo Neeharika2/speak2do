@@ -24,10 +24,15 @@ if str(REPO_ROOT) not in sys.path:
 
 from playwright.async_api import async_playwright
 
+import httpx
+
 from app import config
 
 
 async def main() -> int:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(f"{config.BASE_URL}/portal/__reset")
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -58,7 +63,8 @@ async def main() -> int:
 
         await page.wait_for_function("document.getElementById('live').naturalWidth > 0", timeout=15_000)
         await page.wait_for_function(
-            "document.getElementById('reply-audio').getAttribute('src') !== null", timeout=15_000
+            "(document.getElementById('reply-audio').getAttribute('src') !== null) || (window.__wsAudioCount || 0) > 0",
+            timeout=20_000,
         )
 
         transcript = (await page.inner_text("#transcript")).strip()
@@ -66,16 +72,25 @@ async def main() -> int:
         steps = await page.eval_on_selector_all("#steps li", "els => els.map(e => e.textContent)")
         live_ok = await page.evaluate("document.getElementById('live').naturalWidth > 0")
         audio_src = await page.get_attribute("#reply-audio", "src")
+        ws_audio = await page.evaluate("window.__wsAudioCount || 0")
+        ws_ready = await page.evaluate("window.__wsReady === true")
 
         print("transcript:", transcript)
         print("prompts answered:", answered)
         print("reply:", reply)
         print("steps:", len(steps))
         print("live view frame loaded:", live_ok)
-        print("reply audio:", audio_src)
+        print("ws connected:", ws_ready, "| ws audio chunks:", ws_audio)
+        print("reply audio element:", audio_src)
 
         await browser.close()
-        ok = state == "done" and live_ok and bool(audio_src) and len(steps) >= 10 and answered >= 1
+        ok = (
+            state == "done"
+            and live_ok
+            and (bool(audio_src) or ws_audio > 0)
+            and len(steps) >= 10
+            and answered >= 1
+        )
         print("\nUI SMOKE PASSED" if ok else "\nUI SMOKE FAILED")
         return 0 if ok else 1
 

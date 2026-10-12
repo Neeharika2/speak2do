@@ -12,7 +12,7 @@ app/
   main.py            FastAPI app (agent + portal in one process)
   config.py          env loading, paths, vendor endpoints
   events.py          trace_id event log -> data/task_events.jsonl
-  voice/             Gnani STT (transcribe) + TTS (speak) adapters
+  voice/             Gnani STT/TTS adapters + streaming.py (WebSocket STT/TTS)
   policy/            deterministic policy engine (M1: pass-through)
   agent/             Jev client, loop, observe/values/llm + readback/voice_ux (M3 voice UX)
   browser/           Playwright controller (only module touching the browser)
@@ -25,9 +25,11 @@ scripts/
   hostile_check.py      M2: hostile toggles + submit dup handling (14 checks)
   agent_guards.py       M2: forced-loop / budgets / cost cap / no-progress (4 checks)
   agent_measure.py      M2 gate: 10 runs to review + median step time report
-  voice_ux_check.py     M3: read-back / parsing / corrections / intent checks (23, offline)
+  voice_ux_check.py     M3: read-back / parsing / corrections / intent checks (30, offline)
   voice_accuracy.py     M3 gate: 30-phrase TTS->STT accuracy + read-back simulation
-  voice_session_check.py M3: Q&A, corrections, intent gate, "Aagu" halt (16 checks)
+  voice_session_check.py M3: Q&A, corrections, intent gate, "Aagu" halt (25 checks)
+  streaming_check.py    M4: Gnani WS adapters — streamed TTS chunks + streamed STT (6 checks)
+  voice_ws_check.py     M4: /ws/voice end-to-end — live transcript, streamed TTS (7 checks)
 spikes/
   stt_spike.py          M0 STT spike runner (5 recorded phrases)
   phrases.md            what to record + expected entities
@@ -82,6 +84,8 @@ With the server running:
 .venv/bin/python scripts/voice_ux_check.py         # M3: read-back/parsing checks (offline)
 .venv/bin/python scripts/voice_accuracy.py         # M3 gate: 30-phrase accuracy (>= 90%)
 BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_session_check.py  # M3: Q&A + Aagu
+.venv/bin/python scripts/streaming_check.py        # M4: Gnani WS adapters (TTS/STT)
+BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_ws_check.py       # M4: /ws/voice E2E
 ```
 
 `walking_skeleton.py` synthesizes a Telugu command, transcribes it, drives the login +

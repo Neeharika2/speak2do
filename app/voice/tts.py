@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from pathlib import Path
@@ -36,12 +37,20 @@ async def speak(
         },
     }
     started = time.perf_counter()
+    response = None
     async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            config.GNANI_TTS_URL,
-            headers={"X-API-Key-ID": config.GNANI_API_KEY},
-            json=payload,
-        )
+        for attempt in range(2):  # one retry: flaky TLS nodes have been observed
+            try:
+                response = await client.post(
+                    config.GNANI_TTS_URL,
+                    headers={"X-API-Key-ID": config.GNANI_API_KEY},
+                    json=payload,
+                )
+                break
+            except httpx.TransportError:
+                if attempt == 1:
+                    raise
+                await asyncio.sleep(0.8)
     response.raise_for_status()
     out_path = Path(out_dir) / f"tts_{uuid.uuid4().hex[:8]}.wav"
     out_path.write_bytes(response.content)

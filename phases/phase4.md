@@ -61,14 +61,28 @@ Deferred (noted, not rejected): extracting helpers from the 250-line `run_agent_
 Reported: any phrase ran the same fixed task, and "నా నంబర్ మారింది" was ignored.
 
 - **Intent gate:** commands are checked for application/scholarship keywords (or a correction); unrelated speech gets a clarification reply and **no agent run**.
-- **Corrections by voice:** "నా నంబర్ మారింది" / "నా నంబర్ <digits>" / "నా పేరు <name>" / "జిల్లా <district>" are parsed (Telugu digit words, numerals, English digits; district glossary). Missing values trigger "కొత్త ఫోన్ నంబర్ చెప్పండి."; the value goes into a session overlay and the affected field is re-filled in the form.
+- **Corrections by voice:** "నా నంబర్ మారింది" / "నా నంబర్ <digits>" / "నా పేరు <name>" / "జిల్లా <district>" / pin / address / college / email are parsed. **English works too:** the te-IN STT returns English digits as Telugu script ("నైన్ ఎయిట్ సెవెన్…"), which the parser now understands alongside Telugu words, Latin words, and numerals. Missing values trigger "కొత్త ఫోన్ నంబర్ చెప్పండి."; the value goes into a session overlay and the affected field is re-filled in the form.
+- **Mid-task text corrections:** a pending correction (e.g. "my name has changed") consumes the very next utterance as the new value; name values are token-cleaned and title-cased ("sita devi" → "Sita Devi").
+- **Flaky-vendor resilience:** Gnani STT/TTS clients retry once on transport/TLS errors (a transient bad TLS node in the vendor pool was observed and verified to be vendor-side).
 - **Read-back correction dialogue:** at the name/phone read-back, "కాదు" (or a direct correction) leads to "ఏది మార్చాలి?" → new value → re-read; up to 3 cycles, then safe handoff.
 - **Mid-task:** a correction said while the agent works updates the overlay and acks ("సరే, ఫోన్ నంబర్ నవీకరించాను."); the loop syncs changed fields before saving (`agent.override_applied` event).
 - **Loop:** `profile_overrides` callable merges session overrides per action; corrections are session-only and never written to the profile file (profile saving by voice remains a cut-list item).
 
-Verified: offline **23/23** (parse/glossary/intent); interactive **16/16** — read-back rejection → phone correction saved and re-read; command-time "నా నంబర్ మారింది" → asked → applied → reached review; unrelated command → clarify with zero steps; UI smoke PASS; guards 4/4; agent runs 2/2 (median step 0.53 s); "Aagu" halt 0.23 s; 0 secret leaks.
+Verified: offline **27/27** (parse/glossary/intent, incl. the real STT outputs for English speech); interactive **21/21** — read-back rejection → phone correction saved and re-read; command-time "నా నంబర్ మారింది" → asked → applied → reached review; mid-task "my name has changed" → "Sita Devi" saved and read back; unrelated command → clarify with zero steps; UI smoke PASS; guards 4/4; agent runs 2/2 (median step 0.53 s); "Aagu" halt 0.23 s; 0 secret leaks.
 
-Known limits: correction fields are phone, name, district (not DOB/email yet); corrections after a form is saved do not retroactively change that saved form (read-back is the natural moment); the intent gate is keyword-based, not full NLU.
+Known limits: correction fields are phone, name, district, pin, address, college, email (email extraction is best-effort; DOB not yet); corrections after a form is saved do not retroactively change that saved form (read-back is the natural moment); the intent gate is keyword-based, not full NLU.
+
+## Realtime WebSocket transport (Mon 12 Oct, Gnani realtime APIs)
+
+Voice input/output now runs over WebSockets end to end:
+
+- **Adapters** (`app/voice/streaming.py`): `SttStream` (persistent Gnani `wss://…/stt/v3/stream`; PCM16 mono sent as exactly 1024-byte frames at real-time cadence, VAD min-silence 500 ms, 650 ms silence flush after PTT release) and `synthesize_stream` (Gnani `wss://…/api/v1/tts`; raw PCM chunks delivered progressively).
+- **Server** (`/ws/voice` in `app/api/voice.py`): relays browser mic PCM to Gnani, routes final transcripts through the same command/answer/interrupt logic as REST (0.6 s debounce to merge VAD segments), and streams TTS audio back as base64 chunks. REST endpoints remain the fallback; REST-started sessions attach to the latest live socket for streamed speech.
+- **Browser** (`assistant.html`): streams Int16 PCM frames while the button is held (quick-tap hands-free still works), shows live transcripts, and plays streamed TTS via Web Audio scheduling. Falls back to the WAV-upload path and file playback whenever the socket is unavailable; `audio_fallback` covers a server-side TTS stream failure.
+
+Evidence: adapter checks **6/6** (progressive TTS chunks; STT transcript with 245 ms server latency) · WebSocket end-to-end **7/7** (live command transcript → session → 430 streamed audio messages → review reached) · UI smoke over WS: 23 steps, ~430 audio chunks · offline **30/30** · interactive session **25/25** · guards 4/4 · agent runs 2/2 · 0 secret leaks.
+
+Notes: API keys never reach the browser (the server terminates the vendor sockets); each browser page owns one Gnani STT session (~15 min vendor cap → automatic reconnect on close); TTS still falls back to REST on socket failure.
 
 ## How to run
 

@@ -133,6 +133,66 @@ async def main() -> int:
         check("command-time correction applied", payload.get("phone") == NEW_PHONE, str(payload.get("phone")))
         check("ran to review after correction", data.get("stop_reason") == "done", str(data.get("stop_reason")))
 
+        # ---- 3b. mid-task correction in English: "my name has changed" -> new name
+        await client.post("/portal/__reset")
+        sid = await start(client, "Scholarship application cheyyi")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            data = await status(client, sid)
+            if data["status"] in ("done", "error"):
+                break
+            if data["status"] == "running" and len(data["steps"]) >= 2:
+                break
+            await asyncio.sleep(0.15)
+        r1 = await client.post("/api/voice/interrupt", data={"text": "my name has changed"})
+        check(
+            "mid-task correction asks for new name",
+            r1.status_code == 200 and r1.json().get("pending") == "full_name",
+            str(r1.json()),
+        )
+        r2 = await client.post("/api/voice/interrupt", data={"text": "Sita Devi"})
+        check(
+            "mid-task correction value accepted",
+            r2.status_code == 200 and r2.json().get("updated") is True,
+            str(r2.json()),
+        )
+        prompts = []
+
+        def answer_name(prompt, _data):
+            prompts.append(prompt)
+            return "గుంటూరు" if "District" in prompt else "అవును"
+
+        data = await run_until_done(client, sid, answer_name)
+        payload = portal_db.draft_payload(config.PORTAL_TEST_USER)
+        check("corrected name saved", payload.get("full_name") == "Sita Devi", str(payload.get("full_name")))
+        check("read-back shows corrected name", any("Sita Devi" in p for p in prompts))
+        check("run completed after name correction", data.get("stop_reason") == "done", str(data.get("stop_reason")))
+
+        # ---- 3c. correction AFTER form 1 is saved: record must still update
+        await client.post("/portal/__reset")
+        sid = await start(client, "Scholarship application cheyyi")
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            data = await status(client, sid)
+            if data["status"] in ("done", "error"):
+                break
+            if data["status"] == "running" and len(data["steps"]) >= 13:
+                break
+            await asyncio.sleep(0.15)
+        r1 = await client.post("/api/voice/interrupt", data={"text": "my name is wrong"})
+        routed = r1.json()
+        if routed.get("pending") == "full_name":
+            r2 = await client.post("/api/voice/interrupt", data={"text": "Sita Devi"})
+            check("post-save correction accepted", r2.json().get("updated") is True, str(r2.json()))
+        else:
+            check("post-save correction routed as answer", routed.get("answered") is True, str(routed))
+            r2 = await client.post("/api/voice/answer", data={"text": "Sita Devi"})
+            check("post-save correction accepted", r2.status_code == 200, str(r2.json()))
+        data = await run_until_done(client, sid, lambda p, d: "గుంటూరు" if "District" in p else "అవును")
+        payload = portal_db.draft_payload(config.PORTAL_TEST_USER)
+        check("post-save correction updates the record", payload.get("full_name") == "Sita Devi", str(payload.get("full_name")))
+        check("run completed after post-save correction", data.get("stop_reason") == "done", str(data.get("stop_reason")))
+
         # ---- 4. unrelated command: clarify, no agent steps
         await client.post("/portal/__reset")
         sid = await start(client, "వాతావరణం ఎలా ఉంది")

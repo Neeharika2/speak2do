@@ -86,6 +86,14 @@
       let pollTimer = null;
       let sessionState = null;
       let lastSpeechId = 0;
+      let voiceWs = null;
+      let wsReady = false;
+      let wsLeftover = new Int16Array(0);
+      let wsAudioForSession = 0;
+      const wsAudioSlots = {
+        speech: { id: 0, nextTime: 0, ctx: null },
+        reply: { id: 0, nextTime: 0, ctx: null },
+      };
 
       const STATUS_TEXT = {
         queued: "Thinking…",
@@ -165,7 +173,25 @@
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
         processorNode.onaudioprocess = (event) => {
-          if (recording) chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+          if (!recording) return;
+          const input = event.inputBuffer.getChannelData(0);
+          chunks.push(new Float32Array(input));
+          if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+            const int16 = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i += 1) {
+              const sample = Math.max(-1, Math.min(1, input[i]));
+              int16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+            }
+            const merged = new Int16Array(wsLeftover.length + int16.length);
+            merged.set(wsLeftover, 0);
+            merged.set(int16, wsLeftover.length);
+            let offset = 0;
+            while (merged.length - offset >= 512) {
+              voiceWs.send(merged.slice(offset, offset + 512).buffer);
+              offset += 512;
+            }
+            wsLeftover = merged.slice(offset);
+          }
         };
         muteNode = audioContext.createGain();
         muteNode.gain.value = 0;
@@ -174,6 +200,10 @@
         muteNode.connect(audioContext.destination);
         talkButton.classList.add("recording");
         autoStopTimer = setTimeout(() => stopRecording(), 30000);
+        wsLeftover = new Int16Array(0);
+        if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+          voiceWs.send(JSON.stringify({ type: "start" }));
+        }
         if (handsFree) {
           setStatus("Listening… tap again to send", "recording");
         } else {
@@ -199,6 +229,17 @@
         }
         if (chunks.length === 0) {
           setStatus("Nothing recorded — hold the button while speaking.", "error");
+          return;
+        }
+        if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+          if (wsLeftover.length > 0) {
+            const padded = new Int16Array(512);
+            padded.set(wsLeftover);
+            voiceWs.send(padded.buffer);
+            wsLeftover = new Int16Array(0);
+          }
+          voiceWs.send(JSON.stringify({ type: "stop" }));
+          setStatus("Transcribing…", "transcribing");
           return;
         }
         const wav = encodeWav(chunks, audioContext.sampleRate);
@@ -257,6 +298,7 @@
         currentSession = sessionId;
         sessionState = null;
         lastSpeechId = 0;
+        wsAudioForSession = 0;
         replyEl.textContent = "";
         stepsEl.innerHTML = "";
         if (pollTimer) clearInterval(pollTimer);
@@ -279,8 +321,10 @@
             : data.prompt_text || data.reply_text || "—";
           if (data.speech_id && data.speech_id !== lastSpeechId) {
             lastSpeechId = data.speech_id;
-            audioEl.src = `/api/voice/session/${currentSession}/speech?ts=${Date.now()}`;
-            audioEl.play().catch(() => {});
+            if (!wsReady || wsAudioForSession === 0) {
+              audioEl.src = `/api/voice/session/${currentSession}/speech?ts=${Date.now()}`;
+              audioEl.play().catch(() => {});
+            }
           }
           stepsEl.innerHTML = data.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
           if (data.status === "running" || data.status === "speaking" || data.status === "done") {
@@ -289,7 +333,7 @@
           if (data.status === "done" || data.status === "error") {
             clearInterval(pollTimer);
             pollTimer = null;
-            if (data.status === "done") {
+            if (data.status === "done" && (!wsReady || wsAudioForSession === 0)) {
               audioEl.src = `/api/voice/session/${currentSession}/audio?ts=${Date.now()}`;
               audioEl.play().catch(() => {});
             }
@@ -298,6 +342,83 @@
           /* transient; keep polling */
         }
       }
+
+      function connectVoiceWs() {
+        try {
+          const scheme = location.protocol === "https:" ? "wss" : "ws";
+          voiceWs = new WebSocket(`${scheme}://${location.host}/ws/voice`);
+        } catch (err) {
+          setTimeout(connectVoiceWs, 2000);
+          return;
+        }
+        voiceWs.binaryType = "arraybuffer";
+        voiceWs.onopen = () => {
+          wsReady = true;
+          window.__wsReady = true;
+        };
+        voiceWs.onclose = () => {
+          wsReady = false;
+          window.__wsReady = false;
+          setTimeout(connectVoiceWs, 2000);
+        };
+        voiceWs.onerror = () => {
+          wsReady = false;
+        };
+        voiceWs.onmessage = (event) => {
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch (err) {
+            return;
+          }
+          if (data.type === "processing") {
+            setStatus("Transcribing…", "transcribing");
+          } else if (data.type === "transcript") {
+            transcriptEl.textContent = data.text || "—";
+          } else if (data.type === "audio") {
+            playWsChunk(data);
+          } else if (data.type === "audio_fallback") {
+            playFallbackAudio(data.kind);
+          } else if (data.type === "error") {
+            setStatus("Voice stream error: " + (data.message || ""), "error");
+          }
+        };
+      }
+
+      function playWsChunk(message) {
+        window.__wsAudioCount = (window.__wsAudioCount || 0) + 1;
+        wsAudioForSession += 1;
+        const slot = wsAudioSlots[message.kind] || wsAudioSlots.speech;
+        const ctx = slot.ctx || (slot.ctx = new (window.AudioContext || window.webkitAudioContext)());
+        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        if (slot.id !== message.id) {
+          slot.id = message.id;
+          slot.nextTime = 0;
+        }
+        const binary = atob(message.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+        const samples = new Int16Array(bytes.buffer);
+        const floats = new Float32Array(samples.length);
+        for (let i = 0; i < samples.length; i += 1) floats[i] = samples[i] / 32768;
+        const buffer = ctx.createBuffer(1, floats.length, message.sample_rate || 48000);
+        buffer.copyToChannel(floats, 0);
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        const startAt = Math.max(ctx.currentTime + 0.02, slot.nextTime);
+        source.start(startAt);
+        slot.nextTime = startAt + buffer.duration;
+      }
+
+      function playFallbackAudio(kind) {
+        if (!currentSession) return;
+        const endpoint = kind === "reply" ? "audio" : "speech";
+        audioEl.src = `/api/voice/session/${currentSession}/${endpoint}?ts=${Date.now()}`;
+        audioEl.play().catch(() => {});
+      }
+
+      connectVoiceWs();
 
       function onPointerDown(event) {
         event.preventDefault();

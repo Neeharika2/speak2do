@@ -57,6 +57,25 @@ def main() -> int:
     check("application intent detected", readback.is_application_intent("Scholarship application చేయండి"))
     check("unrelated speech is not application intent", not readback.is_application_intent("వాతావరణం ఎలా ఉంది"))
 
+    # English speech as te-IN STT actually returns it (verified with TTS->STT)
+    check(
+        "english digits in Telugu script parsed",
+        readback.parse_digits("మై ఫోన్ నంబర్ ఈజ్ నైన్ ఎయిట్ సెవెన్ సిక్స్ ఫైవ్ జీరో జీరో జీరో జీరో జీరో")
+        == "9876500000",
+    )
+    check(
+        "english name correction in Telugu script",
+        readback.parse_correction("మై నేమ్ హాస్ చేంజ్డ్ టు సీతాదేవి") == ("full_name", "సీతాదేవి"),
+    )
+    check("english 'name is changed' asks for a value", readback.parse_correction("my name is changed") == ("full_name", None))
+    check(
+        "english name correction with value",
+        readback.parse_correction("my name has changed to sita devi") == ("full_name", "Sita Devi"),
+    )
+    check("'my name is wrong' asks for a value", readback.parse_correction("my name is wrong") == ("full_name", None))
+    check("'my number is wrong' asks for a value", readback.parse_correction("my number is wrong") == ("phone", None))
+    check("'change my name to sita' has a value", readback.parse_correction("change my name to sita") == ("full_name", "Sita"))
+
     check("district alias matched", readback.match_option("మా జిల్లా గుంటూరు", ["Guntur", "Krishna"]) == "Guntur")
     check("english option matched", readback.match_option("Krishna", ["Guntur", "Krishna"]) == "Krishna")
     check("unknown option -> None (re-ask)", readback.match_option("something else", ["Guntur", "Krishna"]) is None)
