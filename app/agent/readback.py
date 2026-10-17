@@ -24,16 +24,7 @@ YES_WORDS = [w.lstrip("=") for w in _TE.word_list("yes")]
 NO_WORDS = [w.lstrip("=") for w in _TE.word_list("no")]
 STOP_WORDS = [w.lstrip("=") for w in _TE.word_list("stop")]
 
-# Correction detection: which field is being changed, and change markers.
-FIELD_KEYWORDS = {
-    "phone": ["ఫోన్", "నంబర్", "నెంబర్", "mobile", "phone", "number"],
-    "full_name": ["పేరు", "నేమ్", "name"],
-    "district": ["జిల్లా", "district"],
-    "pin": ["పిన్", "pin", "postal"],
-    "address": ["చిరునామా", "address"],
-    "college": ["కళాశాల", "college"],
-    "email": ["ఈమెయిల్", "email"],
-}
+# Correction detection: change markers (field names come from the language files).
 CHANGE_WORDS = [
     "మారింది", "మారిపోయింది", "మార్చ", "మార్చండి", "కొత్త", "సరిచేయ", "తప్పు", "సరికాదు",
     "చేంజ్", "చేంజ్డ్", "అప్డేట్",
@@ -193,7 +184,7 @@ def clean_text_value(text: str) -> str | None:
     """
     token_fillers = {
         normalize_text(word)
-        for group in (FIELD_KEYWORDS["full_name"], CHANGE_WORDS, YES_WORDS, NO_WORDS, STOP_WORDS, TEXT_FILLERS)
+        for group in (_TE.field_words()["full_name"], CHANGE_WORDS, YES_WORDS, NO_WORDS, STOP_WORDS, TEXT_FILLERS)
         for word in group
     }
     kept: list[str] = []
@@ -210,12 +201,11 @@ def clean_text_value(text: str) -> str | None:
 
 
 def parse_field_choice(text: str, language: str | None = None) -> str | None:
-    """Which field does the utterance name? (Telugu/English keywords + the language's own.)"""
+    """Which field does the utterance name? (The language's field words plus English.)"""
     normalized = normalize_text(text)
-    keywords = {field: list(words) for field, words in FIELD_KEYWORDS.items()}
-    for field, words in langs.get(language).field_words().items():
-        keywords.setdefault(field, []).extend(w for w in words if w not in keywords[field])
-    for field, words in keywords.items():
+    keywords = langs.get(language).field_words()
+    for field in sorted(keywords, key=lambda f: f == "full_name"):  # "college name" is college
+        words = keywords[field]
         if any(has_word(normalized, word) for word in words):
             return field
     return None

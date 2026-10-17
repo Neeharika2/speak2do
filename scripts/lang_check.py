@@ -16,12 +16,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app import lang as langs
-from app.agent import answers, readback
+from app.agent import answers, fields, readback
 from app.agent.voice_ux import VoiceAgent
 
 RESULTS: list[tuple[str, bool, str]] = []
-FIELDS = ["full_name", "phone", "email", "dob", "gender", "college", "course", "year", "marks",
-          "address", "city", "district", "state", "pin"]
+FIELDS = fields.PROFILE_KEYS
 
 # What a user might say: (yes, no, stop) per language.
 SAMPLES = {

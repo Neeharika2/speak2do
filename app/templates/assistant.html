@@ -100,12 +100,7 @@
         }
       });
 
-      const FIELD_LABELS = {
-        full_name: "Name", phone: "Phone number", email: "Email", dob: "Date of birth",
-        gender: "Gender", college: "College", course: "Course", year: "Year of study",
-        marks: "Marks", address: "Address", city: "City / village", district: "District",
-        state: "State", pin: "PIN code",
-      };
+      const FIELD_LABELS = {{ field_labels | tojson }};  // language code -> field key -> spoken name
       const SAMPLE_RATE = 48000;     // the STT stream is opened at 48 kHz (server side)
       const FRAME_SAMPLES = 512;     // Gnani needs exactly 512-sample PCM16 frames
       const ECHO_TAIL_S = 0.35;      // keep the mic muted briefly after the agent stops talking
@@ -345,7 +340,7 @@
           }
           const entries = Object.entries(data.updated_fields || {});
           updatedEl.textContent = entries.length
-            ? entries.map(([field, value]) => `${FIELD_LABELS[field] || field}: ${value}`).join("\n")
+            ? entries.map(([field, value]) => `${(FIELD_LABELS[data.language] || {})[field] || field}: ${value}`).join("\n")
             : "—";
           stepsEl.innerHTML = data.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
           if (["running", "awaiting", "speaking", "done"].includes(data.status)) {

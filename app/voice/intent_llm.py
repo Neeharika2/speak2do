@@ -29,16 +29,13 @@ from dataclasses import dataclass, field
 import httpx
 
 from app import config, events
-from app.agent import readback
+from app.agent import fields, readback
 
 INTENT_TIMEOUT_S = 4.0  # bounded: a slow LLM must never stall a voice turn
 INTENT_MAX_TOKENS = 300  # a verdict is a short JSON object
 
 # Editable profile keys: secrets and credentials are never voice-editable.
-EDITABLE_FIELDS = [
-    "full_name", "phone", "email", "dob", "gender", "college", "course",
-    "year", "marks", "address", "city", "district", "state", "pin",
-]
+EDITABLE_FIELDS = fields.PROFILE_KEYS
 
 ACTIONS = ("edit", "start_task", "cancel", "unclear")
 

@@ -15,7 +15,7 @@ import asyncio
 from typing import Awaitable, Callable
 
 from app import lang as langs
-from app.agent import answers, readback
+from app.agent import answers, fields, readback
 
 
 class StopRequested(Exception):
@@ -29,7 +29,7 @@ class HandoffError(Exception):
 FORM_1 = "/portal/application/form-1"
 CORRECTION_CYCLES = 3
 FIELD_ATTEMPTS = 4                              # tries to get a usable answer for one field
-CONFIRM_KEYS = {"full_name", "phone", "dob", "email"}  # always confirmed: spelling matters
+CONFIRM_KEYS = fields.CONFIRM_KEYS  # always confirmed: spelling matters
 
 # page path -> phrase key spoken when the agent arrives there
 PROGRESS = {

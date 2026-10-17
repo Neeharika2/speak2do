@@ -55,8 +55,13 @@
     "digits": ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"],
     "digit_aliases": {"oh": "0"},
     "field_words": {
-      "full_name": ["name"],
-      "phone": ["phone", "number", "mobile"]
+      "phone": ["phone", "number", "mobile"],
+      "district": ["district"],
+      "pin": ["pin", "postal"],
+      "address": ["address"],
+      "college": ["college"],
+      "email": ["email"],
+      "full_name": ["name"]
     }
   }
 }

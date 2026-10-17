@@ -524,7 +524,12 @@ async def assistant_page(request: Request):
     return templates.TemplateResponse(
         request,
         "assistant.html",
-        {"title": "Voice Assistant", "languages": langs.available(), "default_language": langs.get().code},
+        {
+            "title": "Voice Assistant",
+            "languages": langs.available(),
+            "default_language": langs.get().code,
+            "field_labels": {lang.code: lang.labels for lang in langs.available()},
+        },
     )
 
 

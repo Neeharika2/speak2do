@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.agent import answers, readback
+from app.agent import answers, fields, readback, values
 from app.agent.voice_ux import StopRequested, VoiceAgent
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -211,6 +211,24 @@ async def main() -> int:
         {"tag": "button", "label": "Save & Continue"}, {"path": "/portal/application/form-1"}, {}
     )
     check("no second name/phone read-back when both were confirmed", len(v.asked) == before)
+
+    # one field registry: page label -> profile key (whole words, specific first)
+    labels = {
+        "Full name": "full_name", "Mobile number": "phone", "Email": "email", "Date of birth": "dob",
+        "College name": "college", "Marks (%)": "marks", "Address line": "address",
+        "City / village": "city", "PIN code": "pin", "User ID": "user_id", "Password": "password",
+        "OTP": "otp", "One-time password": "otp", "Email address": "email",
+        "Opinion": None, "Statement of purpose": None, "Father name": None, "Mother's name": None,
+    }
+    wrong = {label: values.label_key(label) for label, key in labels.items() if values.label_key(label) != key}
+    check("page labels map to the right field (and lookalikes to none)", not wrong, str(wrong))
+    check("secrets: password + OTP only", values.is_secret("One-time password") and values.is_secret("Password")
+          and not values.is_secret("User ID") and not values.is_secret("Full name"))
+    check("login values come from config, not the profile", values.mapped_value("User ID", {}) is not None
+          and values.mapped_value("Full name", {"full_name": "Sita"}) == "Sita")
+    check("voice-editable = profile keys (no login fields)",
+          not {"user_id", "password", "otp"} & set(fields.PROFILE_KEYS) and len(fields.PROFILE_KEYS) == 14)
+    check("'college name' is college, not name", readback.parse_field_choice("college name", "en-IN") == "college")
 
     failed = [name for name, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} answer checks passed")
