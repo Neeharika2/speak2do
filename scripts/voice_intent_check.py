@@ -151,15 +151,29 @@ async def main() -> int:
     real_evon = intent_llm._request_openai_compat
     intent_llm._request_openai_compat = fake_evon
     intent_llm._request = saved_request  # undo the parse() helper's monkeypatch
-    saved = (config.EVON_BASE_URL, config.EVON_API_KEY)
+    gemini_calls: list[str] = []
+
+    async def fake_gemini(prompt: str, _timeout: float) -> str:
+        gemini_calls.append(prompt)
+        return '{"action": "cancel", "confidence": 0.9}'
+
+    real_gemini = intent_llm._request_gemini
+    intent_llm._request_gemini = fake_gemini
+    saved = (config.EVON_BASE_URL, config.EVON_API_KEY, config.GEMINI_API_KEY)
     try:
-        config.EVON_BASE_URL, config.EVON_API_KEY = "", ""
+        config.EVON_BASE_URL, config.EVON_API_KEY, config.GEMINI_API_KEY = "", "", ""
         off = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
         off_json = await intent_llm.complete_json("x", 0.1)
-        check("not configured -> LLM layer off", off is None and off_json is None and not calls, str(len(calls)))
+        check("nothing configured -> LLM layer off", off is None and off_json is None and not calls, str(len(calls)))
+        config.GEMINI_API_KEY = "gemini-test-key"
+        stand_in = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
+        stand_in_json = await intent_llm.complete_json("x", 0.1)
+        check("no Evon -> Gemini stands in", stand_in is not None and stand_in_json is not None
+              and len(gemini_calls) == 2 and not calls, f"{len(gemini_calls)} gemini, {len(calls)} evon")
         config.EVON_BASE_URL, config.EVON_API_KEY = "http://evon.test/v1", "test-key"
         intent = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
-        check("configured -> Evon called, <think> text ignored", intent is not None and intent.action == "cancel", repr(intent))
+        check("Evon configured -> Evon preferred over Gemini, <think> text ignored",
+              intent is not None and intent.action == "cancel" and len(gemini_calls) == 2, repr(intent))
         data = await intent_llm.complete_json("prompt", 0.1)
         last = calls[-1]
         check(
@@ -171,7 +185,8 @@ async def main() -> int:
         )
     finally:
         intent_llm._request_openai_compat = real_evon
-        config.EVON_BASE_URL, config.EVON_API_KEY = saved
+        intent_llm._request_gemini = real_gemini
+        config.EVON_BASE_URL, config.EVON_API_KEY, config.GEMINI_API_KEY = saved
 
     fenced = ('```json\n{"action": "edit", "edits": [{"field": "full_name", "value": "నిహారిక"}], '
               '"confidence": 0.8}\n```')

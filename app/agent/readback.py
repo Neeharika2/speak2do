@@ -1,48 +1,28 @@
-"""Telugu read-back and spoken-answer parsing (plan §6).
+"""Spoken-answer parsing and read-back helpers (plan §6).
 
-Rules implemented here:
-- digits are read digit by digit, grouped;
-- names/values get a confirmation prompt ("సరేనా?");
-- yes/no only counts as an answer to an active prompt;
-- stop words ("ఆగు" and friends) trigger a hard stop;
-- a small glossary maps Telugu-script answers to English portal options;
-- corrections: English/Telugu/Tenglish phrasing, English digit words in both
-  Latin and Telugu script ("నైన్ ఎయిట్ …").
+Language-aware parts take a language code (app/lang tables; default = AGENT_LANGUAGE):
+- yes / no / stop / repeat detection and digit words come from the language table
+  (plus English, which people mix into every language);
+- digits are read back digit by digit, grouped, in the session's language.
+
+Correction parsing ("నా నంబర్ మారింది", "my number changed") is rule-based for Telugu and
+English only; other languages reach the LLM fallback (app/voice/intent_llm.py).
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 
-DIGIT_WORDS = ["సున్నా", "ఒకటి", "రెండు", "మూడు", "నాలుగు", "ఐదు", "ఆరు", "ఏడు", "ఎనిమిది", "తొమ్మిది"]
+from app import lang as langs
 
-YES_WORDS = ["అవును", "అవు", "సరే", "ఓకే", "ఒప్పు", "yes", "ok", "okay", "avunu", "avnu", "sare"]
-NO_WORDS = ["కాదు", "వద్దు", "లేదు", "తప్పు", "no", "kadu", "ledu", "vaddu"]
-# Latin entries match whole words only. Not here: "aap" (Hindi "you"), "chalu" (Hindi "start").
-STOP_WORDS = [
-    "ఆగు", "ఆగండి", "ఆపు", "ఆపండి", "ఆపేయి", "ఆపేయండి", "చాలు",
-    "stop", "aagu",
-]
-REPEAT_WORDS = ["మళ్ళీ", "మళ్లీ", "మరలా", "repeat", "again"]
+_TE = langs.get("te-IN")
 
-ENGLISH_DIGITS = {
-    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
-}
-
-# English digit words as they come back from te-IN STT (Telugu script), plus Telugu words.
-PARSED_DIGIT_WORDS = {
-    "సున్నా": "0", "జీరో": "0",
-    "ఒకటి": "1", "వన్": "1",
-    "రెండు": "2", "టూ": "2",
-    "మూడు": "3", "త్రీ": "3",
-    "నాలుగు": "4", "ఫోర్": "4",
-    "ఐదు": "5", "ఫైవ్": "5", "ఫైవ": "5",
-    "ఆరు": "6", "సిక్స్": "6", "సిక్స": "6",
-    "ఏడు": "7", "సెవెన్": "7", "సెవెన": "7",
-    "ఎనిమిది": "8", "ఎయిట్": "8", "ఎయిట": "8",
-    "తొమ్మిది": "9", "నైన్": "9",
-}
+# Telugu + English word lists used by the correction heuristics below.
+DIGIT_WORDS = [_TE.spoken_digit(i) for i in range(10)]
+YES_WORDS = [w.lstrip("=") for w in _TE.word_list("yes")]
+NO_WORDS = [w.lstrip("=") for w in _TE.word_list("no")]
+STOP_WORDS = [w.lstrip("=") for w in _TE.word_list("stop")]
 
 # Correction detection: which field is being changed, and change markers.
 FIELD_KEYWORDS = {
@@ -59,15 +39,6 @@ CHANGE_WORDS = [
     "చేంజ్", "చేంజ్డ్", "అప్డేట్",
     "change", "changed", "update", "new", "correct", "wrong", "incorrect",
 ]
-FIELD_LABELS_TE = {
-    "phone": "ఫోన్ నంబర్",
-    "full_name": "పేరు",
-    "district": "జిల్లా",
-    "pin": "పిన్ కోడ్",
-    "address": "చిరునామా",
-    "college": "కళాశాల",
-    "email": "ఈమెయిల్",
-}
 
 # "Is this a request to (continue) the application task?"
 INTENT_WORDS = [
@@ -114,23 +85,41 @@ TEXT_STOPWORDS = {
     "not", "wrong", "incorrect",
 }
 
-READBACK_REJECTED = "సరే, ఆపుతున్నాను. వివరాలు సరిచేసి మళ్ళీ ప్రయత్నించండి."
+
+_SEPARATORS = r"\s.,!?।;:\"'()\-"
 
 
 def normalize_text(text: str) -> str:
-    return " ".join((text or "").lower().split())
+    return " ".join(unicodedata.normalize("NFC", text or "").lower().split())
+
+
+def _spans(normalized: str, word: str):
+    """(start, end) of every match of a table word, honouring the matching rules in app/lang."""
+    if word.startswith("="):
+        word = word[1:]
+        pattern = rf"(?<![^{_SEPARATORS}]){re.escape(word)}(?![^{_SEPARATORS}])"
+    elif word.isascii():
+        pattern = rf"(?<![a-z]){re.escape(word)}(?![a-z])"
+    else:
+        pattern = re.escape(word)
+    return [(m.start(), m.end()) for m in re.finditer(pattern, normalized)]
 
 
 def has_word(normalized: str, word: str) -> bool:
-    """Latin words match whole words ("ok" is not in "book"); native-script words match as substrings."""
-    if word.isascii():
-        return re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", normalized) is not None
-    return word in normalized
+    """Latin words match whole words ("ok" is not in "book"); native-script words match as
+    substrings unless the table marks them whole-word with "="."""
+    return bool(_spans(normalized, word))
 
 
-def spoken_digits(value: str) -> str:
+def _any(text: str, words: list[str]) -> bool:
+    normalized = normalize_text(text)
+    return bool(normalized) and any(has_word(normalized, word) for word in words)
+
+
+def spoken_digits(value: str, language: str | None = None) -> str:
     """Read digits digit-by-digit, grouped in two halves (plan §6)."""
-    words = [DIGIT_WORDS[int(ch)] for ch in str(value) if ch.isdigit()]
+    lang = langs.get(language)
+    words = [lang.spoken_digit(int(ch)) for ch in str(value) if ch.isdigit()]
     if not words:
         return str(value)
     if len(words) <= 2:
@@ -139,38 +128,22 @@ def spoken_digits(value: str) -> str:
     return f"{' '.join(words[:mid])}, {' '.join(words[mid:])}"
 
 
-def name_phone_prompt(name: str, phone: str) -> str:
-    return f"మీ పేరు {name}, ఫోన్ నంబర్ {spoken_digits(phone)}. సరేనా?"
-
-
-def options_prompt(label: str, options: list[str]) -> str:
-    return f"{label} చెప్పండి. ఎంపికలు: {', '.join(options)}."
-
-
-def value_prompt(label: str) -> str:
-    return f"{label} చెప్పండి."
-
-
-def parse_yes_no(text: str) -> bool | None:
-    """True = yes, False = no, None = unclear (must re-ask)."""
-    normalized = normalize_text(text)
-    if not normalized:
-        return None
-    if any(has_word(normalized, word) for word in NO_WORDS):
+def parse_yes_no(text: str, language: str | None = None) -> bool | None:
+    """True = yes, False = no, None = unclear (must re-ask). "No" wins over "yes"."""
+    lang = langs.get(language)
+    if _any(text, lang.word_list("no")):
         return False
-    if any(has_word(normalized, word) for word in YES_WORDS):
+    if _any(text, lang.word_list("yes")):
         return True
     return None
 
 
-def is_stop(text: str) -> bool:
-    normalized = normalize_text(text)
-    return any(has_word(normalized, word) for word in STOP_WORDS)
+def is_stop(text: str, language: str | None = None) -> bool:
+    return _any(text, langs.get(language).word_list("stop"))
 
 
-def is_repeat(text: str) -> bool:
-    normalized = normalize_text(text)
-    return any(has_word(normalized, word) for word in REPEAT_WORDS)
+def is_repeat(text: str, language: str | None = None) -> bool:
+    return _any(text, langs.get(language).word_list("repeat"))
 
 
 def match_option(text: str, options: list[str]) -> str | None:
@@ -194,24 +167,15 @@ def match_option(text: str, options: list[str]) -> str | None:
     return None
 
 
-def parse_digits(text: str) -> str:
-    """Extract digits from Telugu words, English words (Latin or Telugu script), or numerals."""
+def parse_digits(text: str, language: str | None = None) -> str:
+    """Extract digits from numerals (any script) and digit words of the language (+ English)."""
+    normalized = normalize_text(text)
     candidates: list[tuple[int, int, str]] = []  # start, end, digit
-    for word, digit in PARSED_DIGIT_WORDS.items():
-        start = 0
-        while True:
-            position = text.find(word, start)
-            if position == -1:
-                break
-            candidates.append((position, position + len(word), digit))
-            start = position + 1
-    for position, char in enumerate(text):
+    for word, digit in langs.get(language).digit_words().items():
+        candidates += [(start, end, digit) for start, end in _spans(normalized, word)]
+    for position, char in enumerate(normalized):
         if char.isdigit():
-            candidates.append((position, position + 1, char))
-    for match in re.finditer(r"[a-z]+", text.lower()):
-        token = match.group(0)
-        if token in ENGLISH_DIGITS:
-            candidates.append((match.start(), match.end(), ENGLISH_DIGITS[token]))
+            candidates.append((position, position + 1, str(unicodedata.digit(char))))  # "५" -> "5"
     candidates.sort(key=lambda item: (item[0], -(item[1] - item[0])))
     used_end = -1
     digits: list[str] = []
@@ -245,10 +209,14 @@ def clean_text_value(text: str) -> str | None:
     return cleaned
 
 
-def parse_field_choice(text: str) -> str | None:
+def parse_field_choice(text: str, language: str | None = None) -> str | None:
+    """Which field does the utterance name? (Telugu/English keywords + the language's own.)"""
     normalized = normalize_text(text)
-    for field, words in FIELD_KEYWORDS.items():
-        if any(word in normalized for word in words):
+    keywords = {field: list(words) for field, words in FIELD_KEYWORDS.items()}
+    for field, words in langs.get(language).field_words().items():
+        keywords.setdefault(field, []).extend(w for w in words if w not in keywords[field])
+    for field, words in keywords.items():
+        if any(has_word(normalized, word) for word in words):
             return field
     return None
 
@@ -274,14 +242,14 @@ def _mentions_negation(text: str) -> bool:
     return any(word in normalized for word in ("కాదు", "వద్దు", "లేదు", "తప్పు", "kadu", "ledu", "vaddu"))
 
 
-def extract_field_value(field: str, text: str) -> str | None:
+def extract_field_value(field: str, text: str, language: str | None = None) -> str | None:
     """Pull a usable value for a corrected field out of an utterance."""
     normalized = normalize_text(text)
     if field == "phone":
-        digits = parse_digits(normalized)
+        digits = parse_digits(normalized, language)
         return digits if len(digits) >= 6 else None
     if field == "pin":
-        digits = parse_digits(normalized)
+        digits = parse_digits(normalized, language)
         return digits if len(digits) >= 4 else None
     if field == "district":
         return match_option(normalized, DISTRICT_OPTIONS)

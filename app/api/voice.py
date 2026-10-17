@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from app import config, events
+from app import lang as langs
 from app.agent import readback, values
 from app.agent.loop import run_agent_goal
 from app.agent.voice_ux import VoiceAgent
@@ -46,19 +47,7 @@ INTENT_MIN_CONFIDENCE = 0.7      # apply LLM edits at or above this
 INTENT_CONFIRM_CONFIDENCE = 0.4  # between this and the minimum: ask a confirm question
 INTENT_INTERRUPT_CONFIDENCE = 0.8  # mid-run edits may not stall the flow with a Q&A
 
-REPLY_DONE = "అప్లికేషన్ వివరాలు నింపి, రివ్యూ పేజీకి చేరుకున్నాను."
-REPLY_STOPPED = "ఆపేశాను."
-REPLY_HANDOFF = "క్షమించండి, నాకు మీ సహాయం కావాలి."
-REPLY_FAILED = "క్షమించండి, పనిని పూర్తి చేయలేకపోయాను. సహాయం అవసరం."
-REPLY_EMPTY = "క్షమించండి, వినిపించలేదు. మళ్ళీ చెప్పండి."
-REPLY_CLARIFY = (
-    "నేను ఇప్పుడు scholarship application విషయంలో సహాయం చేయగలను. "
-    "\"Scholarship application చేయండి\" అని చెప్పండి."
-)
-GREETING = (
-    "నమస్కారం! స్కాలర్‌షిప్ అప్లికేషన్ నింపడంలో సహాయం చేస్తాను. "
-    "కొన్ని వివరాలు అడుగుతాను. ఆపాలంటే \"ఆగు\" అనండి."
-)
+# Everything the agent says comes from the session language (app/lang/<code>.json).
 
 
 @dataclass
@@ -68,6 +57,7 @@ class Session:
     id: str
     trace_id: str
     dir: Path
+    language: str = config.DEFAULT_LANGUAGE
     status: str = "queued"
     transcript: str = ""
     reply_text: str = ""
@@ -123,7 +113,16 @@ def _log_unmatched(session: Session, transcript: str, context: str) -> None:
     events.log_event(session.trace_id, "voice.unmatched", transcript=transcript, context=context)
 
 
-def _new_session() -> Session:
+def _say(session: Session, key: str, **values: object) -> str:
+    """A phrase in the session's language."""
+    return langs.get(session.language).say(key, **values)
+
+
+def _label(session: Session, field: str) -> str:
+    return langs.get(session.language).label(field)
+
+
+def _new_session(language: str | None = None) -> Session:
     sid = f"s_{uuid.uuid4().hex[:10]}"
     session_dir = SESSIONS_DIR / sid
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +130,7 @@ def _new_session() -> Session:
         id=sid,
         trace_id=events.new_trace_id(),
         dir=session_dir,
+        language=langs.get(language).code,
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         base_profile=values.load_profile(),
     )
@@ -156,15 +156,14 @@ def _apply_session_correction(session: Session, field: str, value: str) -> dict:
 
 
 async def _collect_field_value(session: Session, field: str) -> str | None:
-    label_te = readback.FIELD_LABELS_TE.get(field, field)
     for _ in range(2):
         try:
-            answer = await _ask(session, f"కొత్త {label_te} చెప్పండి.", "value")
+            answer = await _ask(session, _say(session, "new_value", label=_label(session, field)), "value")
         except asyncio.TimeoutError:
             continue  # slow answer: re-ask; the loop gives up after two tries
-        if readback.is_stop(answer):
+        if readback.is_stop(answer, session.language):
             return None
-        value = readback.extract_field_value(field, answer)
+        value = readback.extract_field_value(field, answer, session.language)
         if value:
             return value
     return None
@@ -204,13 +203,15 @@ async def _stream_speech(session: Session, text: str, kind: str, filename: str) 
             )
 
         try:
-            pcm = await streaming.synthesize_stream(text, on_chunk)
+            lang = langs.get(session.language)
+            pcm = await streaming.synthesize_stream(text, on_chunk, voice=lang.voice, language=lang.code)
             (session.dir / filename).write_bytes(streaming.pcm_to_wav(pcm))
             await safe_send({"type": "audio_done", "kind": kind, "id": stream_id})
         except Exception as exc:  # noqa: BLE001 — fall back to REST
             events.log_event(session.trace_id, "voice.stream_error", error=str(exc))
             try:
-                result = await tts.speak(text, out_dir=session.dir)
+                lang = langs.get(session.language)
+                result = await tts.speak(text, language=lang.code, voice=lang.voice, out_dir=session.dir)
                 Path(result["path"]).replace(session.dir / filename)
             except Exception as rest_exc:  # noqa: BLE001 — speech must never break the task
                 events.log_event(session.trace_id, "voice.speech_error", error=str(rest_exc))
@@ -278,15 +279,14 @@ async def _confirm_edits(session: Session, edits: list[intent_llm.Edit]) -> bool
     for edit in edits:
         if not edit.value:
             continue
-        label = readback.FIELD_LABELS_TE.get(edit.field, edit.field)
-        parts.append(f"{label} {edit.value}")
+        parts.append(f"{_label(session, edit.field)} {edit.value}")
     if not parts:
         return False
     try:
-        answer = await _ask(session, "మీరు " + ", ".join(parts) + " అని మార్చాలనుకుంటున్నారా?", "yes_no")
+        answer = await _ask(session, _say(session, "confirm_edits", changes=", ".join(parts)), "yes_no")
     except asyncio.TimeoutError:
         return False
-    return readback.parse_yes_no(answer) is True
+    return readback.parse_yes_no(answer, session.language) is True
 
 
 async def _apply_intent_edits(
@@ -303,8 +303,7 @@ async def _apply_intent_edits(
             else:
                 # stay responsive mid-run: ask now, collect on the next utterance
                 session.pending_correction = edit.field
-                label = readback.FIELD_LABELS_TE.get(edit.field, edit.field)
-                _publish_speech(session, f"కొత్త {label} చెప్పండి.")
+                _publish_speech(session, _say(session, "new_value", label=_label(session, edit.field)))
                 pending.append(edit.field)
                 continue
         if value:
@@ -352,8 +351,8 @@ async def _fallback_intent(session: Session, transcript: str, context: str) -> s
             return "pending"
         _log_unmatched(session, transcript, context)
         return "unmatched"
-    labels = ", ".join(readback.FIELD_LABELS_TE.get(field, field) for field in applied)
-    _publish_speech(session, f"సరే, {labels} నవీకరించాను.")
+    labels = ", ".join(_label(session, field) for field in applied)
+    _publish_speech(session, _say(session, "updated", labels=labels))
     events.log_event(session.trace_id, "voice.llm_applied", fields=applied, context=context)
     return "edits_applied"
 
@@ -372,6 +371,7 @@ async def _run_agent(session: Session) -> None:
         on_answer=lambda field, value: _remember_answer(session, field, value),
         on_forget=lambda field: session.overrides.pop(field, None),
         trace_id=session.trace_id,
+        language=session.language,
     )
     result = await run_agent_goal(
         config.AGENT_GOAL,
@@ -387,14 +387,14 @@ async def _run_agent(session: Session) -> None:
     )
     session.stop_reason = result["stop_reason"]
     if result["stop_reason"] == "user_stop":
-        await _speak_reply(session, REPLY_STOPPED)
+        await _speak_reply(session, _say(session, "reply_stopped"))
     elif result["success"]:
-        await _speak_reply(session, REPLY_DONE)
+        await _speak_reply(session, _say(session, "reply_done"))
     elif result["stop_reason"] == "handoff":
-        await _speak_reply(session, REPLY_HANDOFF)
+        await _speak_reply(session, _say(session, "reply_handoff"))
     else:
         events.log_event(session.trace_id, "agent.not_done", stop_reason=result["stop_reason"])
-        await _speak_reply(session, REPLY_FAILED)
+        await _speak_reply(session, _say(session, "reply_failed"))
 
 
 async def _run_session(session: Session, body: Awaitable[None]) -> None:
@@ -413,7 +413,8 @@ async def _run_session(session: Session, body: Awaitable[None]) -> None:
 async def _conversation(session: Session) -> None:
     """Start button: the agent greets the user, then asks for each field as it fills the form."""
     events.log_event(session.trace_id, "conversation.start")
-    _publish_speech(session, GREETING)
+    events.log_event(session.trace_id, "conversation.language", language=session.language)
+    _publish_speech(session, _say(session, "greeting"))
     await _run_agent(session)
 
 
@@ -425,13 +426,13 @@ async def _command(session: Session, audio_path: Path | None, text: str | None) 
         events.log_event(trace_id, "text.command", transcript=transcript)
     else:
         session.status = "transcribing"
-        stt_result = await stt.transcribe(audio_path)
+        stt_result = await stt.transcribe(audio_path, language=session.language)
         transcript = stt_result["transcript"].strip()
         events.log_event(trace_id, "stt.command", duration_ms=stt_result["latency_ms"], transcript=transcript)
     session.transcript = transcript
 
     if not transcript:
-        await _speak_reply(session, REPLY_EMPTY)
+        await _speak_reply(session, _say(session, "reply_empty"))
         return
     correction = readback.parse_correction(transcript)
     if correction is not None:
@@ -441,20 +442,20 @@ async def _command(session: Session, audio_path: Path | None, text: str | None) 
         if not value:
             session.stop_reason = "clarify"
             _log_unmatched(session, transcript, "correction_value")
-            await _speak_reply(session, REPLY_FAILED)
+            await _speak_reply(session, _say(session, "reply_failed"))
             return
         _apply_session_correction(session, field, value)
-        _publish_speech(session, f"సరే, {readback.FIELD_LABELS_TE.get(field, field)} నవీకరించాను.")
+        _publish_speech(session, _say(session, "updated", labels=_label(session, field)))
     elif not readback.is_application_intent(transcript):
         # rules found neither a correction nor the task intent: LLM fallback
         outcome = await _fallback_intent(session, transcript, "command")
         if outcome == "cancelled":
             session.stop_reason = "user_stop"
-            await _speak_reply(session, REPLY_STOPPED)
+            await _speak_reply(session, _say(session, "reply_stopped"))
             return
         if outcome not in ("edits_applied", "start_task"):
             session.stop_reason = "clarify"
-            await _speak_reply(session, REPLY_CLARIFY)
+            await _speak_reply(session, _say(session, "reply_clarify"))
             return
     await _run_agent(session)
 
@@ -466,7 +467,7 @@ async def _transcribe_input(session: Session, audio: UploadFile | None, text: st
         return ""
     path = session.dir / f"input_{uuid.uuid4().hex[:6]}.wav"
     path.write_bytes(await audio.read())
-    result = await stt.transcribe(path)
+    result = await stt.transcribe(path, language=session.language)
     return result["transcript"].strip()
 
 
@@ -481,26 +482,26 @@ def _handle_answer(session: Session, transcript: str) -> dict:
 
 
 async def _handle_interrupt(session: Session, transcript: str) -> dict:
-    if readback.is_stop(transcript):
+    if readback.is_stop(transcript, session.language):
         session.stop_flag = True
         events.log_event(session.trace_id, "voice.stop_requested", transcript=transcript)
         return {"ok": True, "stopped": True, "transcript": transcript}
     correction = readback.parse_correction(transcript)
     if correction is None and session.pending_correction:
-        value = readback.extract_field_value(session.pending_correction, transcript)
+        value = readback.extract_field_value(session.pending_correction, transcript, session.language)
         if value:
             correction = (session.pending_correction, value)
     if correction is not None:
         field, value = correction
         if value is None:
-            value = readback.extract_field_value(field, transcript)
+            value = readback.extract_field_value(field, transcript, session.language)
         if value:
             _apply_session_correction(session, field, value)
             session.pending_correction = None
-            _publish_speech(session, f"సరే, {readback.FIELD_LABELS_TE.get(field, field)} నవీకరించాను.")
+            _publish_speech(session, _say(session, "updated", labels=_label(session, field)))
             return {"ok": True, "updated": True, "field": field, "transcript": transcript}
         session.pending_correction = field
-        _publish_speech(session, f"కొత్త {readback.FIELD_LABELS_TE.get(field, field)} చెప్పండి.")
+        _publish_speech(session, _say(session, "new_value", label=_label(session, field)))
         return {"ok": True, "pending": field, "transcript": transcript}
     # rules found nothing: LLM fallback (edits only; mid-run may not stall with Q&A)
     outcome = await _fallback_intent(session, transcript, "interrupt")
@@ -520,14 +521,20 @@ async def _handle_interrupt(session: Session, transcript: str) -> dict:
 
 @router.get("/assistant", response_class=HTMLResponse)
 async def assistant_page(request: Request):
-    return templates.TemplateResponse(request, "assistant.html", {"title": "Voice Assistant"})
+    return templates.TemplateResponse(
+        request,
+        "assistant.html",
+        {"title": "Voice Assistant", "languages": langs.available(), "default_language": langs.get().code},
+    )
 
 
 @router.post("/api/voice/command")
-async def voice_command(audio: UploadFile | None = File(None), text: str | None = Form(None)):
+async def voice_command(
+    audio: UploadFile | None = File(None), text: str | None = Form(None), language: str | None = Form(None)
+):
     if _active_session():
         raise HTTPException(status_code=409, detail="The agent is already busy with another task.")
-    session = _new_session()
+    session = _new_session(language)
     _attach_ws(session)
     audio_path: Path | None = None
     if text is None and audio is not None:
@@ -539,11 +546,11 @@ async def voice_command(audio: UploadFile | None = File(None), text: str | None 
 
 
 @router.post("/api/voice/start")
-async def voice_start():
+async def voice_start(language: str | None = Form(None)):
     """Start an agent-led conversation (the page's Start button uses the socket; tests use this)."""
     if _active_session():
         raise HTTPException(status_code=409, detail="The agent is already busy with another task.")
-    session = _new_session()
+    session = _new_session(language)
     _attach_ws(session)
     session.task = asyncio.create_task(_run_session(session, _conversation(session)))
     return {"session_id": session.id}
@@ -594,6 +601,7 @@ async def session_status(sid: str):
         "speech_id": session.speech_id,
         "stop_reason": session.stop_reason,
         "updated_fields": dict(session.overrides),
+        "language": session.language,
     }
 
 
@@ -728,10 +736,14 @@ async def voice_websocket(websocket: WebSocket):
                 continue
             kind = command.get("type")
             if kind == "begin":
-                # Start button: agent-led conversation bound to this socket
+                # Start button: agent-led conversation in the chosen language, bound to this socket
                 session = _active_session()
                 if session is None:
-                    session = _new_session()
+                    session = _new_session(command.get("language"))
+                    try:  # recognise speech in the session's language from now on
+                        await stt_stream.set_language(session.language)
+                    except Exception as exc:  # noqa: BLE001 — the run still works; the user can type
+                        events.log_event(session.trace_id, "stt.language_error", error=str(exc))
                     session.task = asyncio.create_task(_run_session(session, _conversation(session)))
                 session.ws_send = send_json
                 await send_json({"type": "session", "session_id": session.id})

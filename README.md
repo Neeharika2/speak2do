@@ -27,6 +27,7 @@ scripts/
   agent_measure.py      M2 gate: 10 runs to review + median step time report
   voice_ux_check.py     M3: read-back / parsing / corrections / intent checks (30, offline)
   answers_check.py      spoken answer -> valid field value + confirm/echo flow (offline)
+  lang_check.py         language tables: phrases, digits, yes/no/stop for all 10 languages (offline)
   voice_accuracy.py     M3 gate: 30-phrase TTS->STT accuracy + read-back simulation
   voice_session_check.py M3: Q&A, corrections, intent gate, "Aagu" halt (25 checks)
   streaming_check.py    M4: Gnani WS adapters — streamed TTS chunks + streamed STT (6 checks)
@@ -84,6 +85,7 @@ With the server running:
 .venv/bin/python scripts/agent_measure.py --runs 10 # M2 gate: >= 8/10 reach review
 .venv/bin/python scripts/voice_ux_check.py         # M3: read-back/parsing checks (offline)
 .venv/bin/python scripts/answers_check.py          # per-field answer parsing + confirm flow (offline)
+.venv/bin/python scripts/lang_check.py             # language tables, all 10 languages (offline)
 .venv/bin/python scripts/voice_intent_check.py     # M5: LLM intent fallback checks (offline)
 .venv/bin/python scripts/voice_unmatched.py        # M5: list utterances no layer could place
 .venv/bin/python scripts/voice_accuracy.py         # M3 gate: 30-phrase accuracy (>= 90%)
@@ -119,7 +121,12 @@ with the synthetic sample:
   `EVON_BASE_URL`, `EVON_API_KEY`, `EVON_MODEL` (Gnani API beta, a FriendliAI dedicated
   endpoint, or self-hosted vLLM/SGLang). It turns spoken answers in any language into
   form values (English letters, dates, digits, options) and places unclear commands.
-  Thinking mode is off, 300-token cap. Unset = rules only.
+  Thinking mode is off, 300-token cap. Until Evon access is granted, Gemini
+  (`GEMINI_API_KEY`, default `gemini-3.5-flash-lite`) stands in automatically; with
+  neither set, rules only.
+- Languages: pick one on the start screen (default `AGENT_LANGUAGE`). It sets STT, TTS
+  and every spoken prompt. Each language is one file in `app/lang/<code>.json` (phrases,
+  field names, yes/no/stop and digit words) — add a file to add a language.
 - All portal data is synthetic; passwords/OTPs are redacted in event logs.
 - Jev is a decision model (not a browser driver): the loop observes/executes,
   Jev picks actions. See `docs/m0_vendor_status.md`.

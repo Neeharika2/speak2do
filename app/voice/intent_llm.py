@@ -9,8 +9,9 @@ LLM proposes, deterministic code disposes.
 
 Model: Gnani Evon v3.3 over an OpenAI-compatible /v1/chat/completions endpoint
 (Gnani API beta, a FriendliAI dedicated endpoint, or self-hosted vLLM/SGLang),
-thinking mode disabled. Configure EVON_BASE_URL, EVON_API_KEY, EVON_MODEL; when
-they are not set the LLM layer is simply off and the rules work alone.
+thinking mode disabled. Configure EVON_BASE_URL, EVON_API_KEY, EVON_MODEL.
+Until Evon access is granted, Gemini (GEMINI_API_KEY) stands in automatically;
+with neither configured the LLM layer is off and the rules work alone.
 
 Test knobs:
     VOICE_INTENT_FAKE_JSON   — canned response text, skips the API (offline tests)
@@ -90,8 +91,21 @@ def _prompt(transcript: str, current_values: dict) -> str:
     return f"{_instructions()}\n\n{_context(transcript, current_values)}"
 
 
+def _provider() -> str | None:
+    """Evon when configured; Gemini as the stand-in until Evon access; None = rules only."""
+    if config.EVON_BASE_URL and config.EVON_API_KEY:
+        return "evon"
+    if config.GEMINI_API_KEY:
+        return "gemini"
+    return None
+
+
 def _configured() -> bool:
-    return bool(config.EVON_BASE_URL and config.EVON_API_KEY)
+    return _provider() is not None
+
+
+def _model() -> str:
+    return config.EVON_MODEL if _provider() == "evon" else config.GEMINI_MODEL
 
 
 def _openai_payloads(transcript: str, current_values: dict) -> list[dict]:
@@ -142,18 +156,35 @@ async def _request_openai_compat(payloads: list[dict], timeout_s: float) -> str:
     return data["choices"][0]["message"]["content"]
 
 
+async def _request_gemini(prompt: str, timeout_s: float) -> str:
+    """Gemini generateContent in JSON mode (the stand-in provider)."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
+    }
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        response = await client.post(url, headers={"x-goog-api-key": config.GEMINI_API_KEY}, json=body)
+    response.raise_for_status()
+    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
 async def _request(transcript: str, current_values: dict, timeout_s: float) -> str:
     """Intent call (tests monkeypatch this). Returns the raw model text."""
+    if _provider() == "gemini":
+        return await _request_gemini(_prompt(transcript, current_values), timeout_s)
     return await _request_openai_compat(_openai_payloads(transcript, current_values), timeout_s)
 
 
 async def complete_json(prompt: str, timeout_s: float = INTENT_TIMEOUT_S) -> dict | None:
-    """One-shot JSON completion on Evon; None when not configured, disabled or invalid.
+    """One-shot JSON completion (Evon, or the Gemini stand-in); None when off or invalid.
 
     Shared by other voice parsers (e.g. app/agent/answers.py) so there is one model seam.
     """
     if os.environ.get(DISABLED_ENV) or not _configured():
         return None
+    if _provider() == "gemini":
+        return _loads_jsonish(await _request_gemini(prompt, timeout_s))
     base = {
         "model": config.EVON_MODEL,
         "temperature": 0.0,
@@ -237,7 +268,7 @@ async def parse_intent(
 
     fake = os.environ.get(FAKE_ENV)
     started = time.perf_counter()
-    source = "fake" if fake else "evon"
+    source = "fake" if fake else _provider()
     if fake:
         raw = fake
     else:
@@ -269,6 +300,6 @@ async def parse_intent(
         confidence=intent.confidence,
         latency_ms=latency_ms,
         source=source,
-        model=config.EVON_MODEL,
+        model=_model(),
     )
     return intent

@@ -97,6 +97,15 @@ class SttStream:
         await self.close()
         await self.connect()
 
+    async def set_language(self, language: str) -> None:
+        """Switch recognition language (the vendor fixes it per connection, so reconnect)."""
+        if language == self.language and self.alive:
+            return
+        self.language = language
+        events.log_event("stt", "stt.language", language=language)
+        await self.close()
+        await self.connect()
+
     async def connect(self) -> None:
         if not config.GNANI_API_KEY:
             raise RuntimeError("GNANI_API_KEY is not set")

@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 
 from app import events
+from app import lang as langs
 from app.agent import readback, values
 from app.voice import intent_llm
 
@@ -96,7 +97,7 @@ def field_spec(element: dict, options: list[str] | None = None) -> FieldSpec:
 # --------------------------------------------------------------------------- validation
 
 
-def validate(spec: FieldSpec, value: object) -> str | None:
+def validate(spec: FieldSpec, value: object, language: str | None = None) -> str | None:
     """Return the canonical value if it fits the field, else None."""
     if value is None:
         return None
@@ -126,8 +127,11 @@ def validate(spec: FieldSpec, value: object) -> str | None:
     if spec.kind == "email":
         email = text.lower().replace(" ", "")
         return email if re.fullmatch(r"[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}", email) else None
-    # free text
-    if readback.parse_yes_no(text) is not None and len(text.split()) <= 2:
+    # free text: no trailing sentence punctuation ("सीता देवी।" -> "सीता देवी")
+    text = text.strip(" .,!?।॥")
+    if not text:
+        return None
+    if readback.parse_yes_no(text, language) is not None and len(text.split()) <= 2:
         return None  # "yes" / "no" is not a name or an address
     if not (spec.min_len <= len(text) <= spec.max_len):
         return None
@@ -181,7 +185,7 @@ _LEAD_IN = re.compile(r"^(?:(?:my|our|the|his|her)\s+)?(?:[\w-]+\s+){0,3}?(?:is|
 
 def _rule_text(text: str) -> str | None:
     """Plain English answers: drop a short lead-in ("my name is ...") and keep the value's case."""
-    stripped = " ".join(text.split()).strip(" .,!?")
+    stripped = " ".join(text.split()).strip(" .,!?।॥")
     if not stripped or not stripped.isascii() or readback._mentions_negation(stripped):
         return None
     lead = _LEAD_IN.match(stripped.lower())
@@ -191,12 +195,12 @@ def _rule_text(text: str) -> str | None:
     return stripped or None
 
 
-def _rules(spec: FieldSpec, utterance: str) -> Parsed:
+def _rules(spec: FieldSpec, utterance: str, language: str | None) -> Parsed:
     if spec.kind == "option":
         match = readback.match_option(utterance, spec.options)
         return Parsed(match, True, "rules") if match else Parsed(None)
     if spec.kind == "digits":
-        value = validate(spec, readback.parse_digits(readback.normalize_text(utterance)))
+        value = validate(spec, readback.parse_digits(utterance, language))
         return Parsed(value, True, "rules") if value else Parsed(None)
     if spec.kind == "number":
         numbers = re.findall(r"\d+(?:\.\d+)?", utterance)  # numerals only: "eighty one" goes to the LLM
@@ -209,7 +213,7 @@ def _rules(spec: FieldSpec, utterance: str) -> Parsed:
         email, whole = _rule_email(utterance)
         value = validate(spec, email)
         return Parsed(value, whole, "rules") if value else Parsed(None)
-    value = validate(spec, _rule_text(utterance))
+    value = validate(spec, _rule_text(utterance), language)
     return Parsed(value, True, "rules") if value else Parsed(None)
 
 
@@ -254,7 +258,7 @@ async def _llm_extract(spec: FieldSpec, utterance: str) -> dict | None:
     return await intent_llm.complete_json(_llm_prompt(spec, utterance), LLM_TIMEOUT_S)
 
 
-async def _llm(spec: FieldSpec, utterance: str, trace_id: str) -> Parsed:
+async def _llm(spec: FieldSpec, utterance: str, trace_id: str, language: str | None) -> Parsed:
     try:
         data = await _llm_extract(spec, utterance)
     except Exception as exc:  # noqa: BLE001 — extraction must never break the run
@@ -262,7 +266,7 @@ async def _llm(spec: FieldSpec, utterance: str, trace_id: str) -> Parsed:
         return Parsed(None)
     if not isinstance(data, dict):
         return Parsed(None)
-    value = validate(spec, data.get("value"))
+    value = validate(spec, data.get("value"), language)
     if value is None:
         return Parsed(None)
     confident = data.get("confident") is True and (spec.kind != "text" or value.isascii())
@@ -272,17 +276,19 @@ async def _llm(spec: FieldSpec, utterance: str, trace_id: str) -> Parsed:
 # --------------------------------------------------------------------------- entry points
 
 
-async def parse_answer(spec: FieldSpec, utterance: str, *, trace_id: str = "") -> Parsed:
+async def parse_answer(
+    spec: FieldSpec, utterance: str, *, trace_id: str = "", language: str | None = None
+) -> Parsed:
     """Best valid value for the field from one utterance (value None = ask again)."""
     utterance = (utterance or "").strip()
     parsed = Parsed(None)
     if utterance:
-        parsed = _rules(spec, utterance)
+        parsed = _rules(spec, utterance, language)
         if parsed.value is None:
-            parsed = await _llm(spec, utterance, trace_id)
+            parsed = await _llm(spec, utterance, trace_id, language)
         if parsed.value is None and spec.kind == "text":
             # no LLM available: keep the spoken words (native script), but confirm them
-            value = validate(spec, readback.clean_text_value(utterance))
+            value = validate(spec, readback.clean_text_value(utterance), language)
             parsed = Parsed(value, False, "rules") if value else Parsed(None)
     events.log_event(
         trace_id or "voice", "voice.answer_parsed", field=spec.key or spec.label, kind=spec.kind,
@@ -291,22 +297,23 @@ async def parse_answer(spec: FieldSpec, utterance: str, *, trace_id: str = "") -
     return parsed
 
 
-def spoken(spec: FieldSpec, value: str) -> str:
+def spoken(spec: FieldSpec, value: str, lang: langs.Lang | None = None) -> str:
     """How to say a value back to the user."""
     if spec.kind == "digits":
-        return readback.spoken_digits(value)
+        return readback.spoken_digits(value, lang.code if lang else None)
     if spec.kind == "date":
         day = dt.date.fromisoformat(value)
         return f"{day.day} {MONTHS[day.month - 1].title()} {day.year}"
     return value
 
 
-def hint(spec: FieldSpec) -> str:
-    """Extra guidance when an answer could not be used (Telugu for now; languages in step 3)."""
+def hint(spec: FieldSpec, lang: langs.Lang | None = None) -> str:
+    """Extra guidance when an answer could not be used, in the session language."""
+    lang = lang or langs.get()
     if spec.kind == "digits" and spec.min_len == spec.max_len:
-        return f" {spec.min_len} అంకెలు చెప్పండి."
+        return lang.say("hint_digits", n=spec.min_len)
     if spec.kind == "date":
-        return " రోజు, నెల, సంవత్సరం చెప్పండి."
+        return lang.say("hint_date")
     if spec.kind == "email":
-        return " ఉదాహరణకు: sita at gmail dot com."
+        return lang.say("hint_email")
     return ""

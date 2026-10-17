@@ -31,10 +31,13 @@ GNANI_API_KEY = os.environ.get("GNANI_API_KEY", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
 
 # Language model: Gnani Evon v3.3 on any OpenAI-compatible /v1 endpoint (Gnani API beta,
-# FriendliAI dedicated endpoint, or self-hosted vLLM/SGLang). Unset = LLM layer off, rules only.
+# FriendliAI dedicated endpoint, or self-hosted vLLM/SGLang). Unset = Gemini stand-in, else rules only.
 EVON_BASE_URL = os.environ.get("EVON_BASE_URL", "")   # e.g. https://api.friendli.ai/dedicated/v1
 EVON_API_KEY = os.environ.get("EVON_API_KEY", "")
 EVON_MODEL = os.environ.get("EVON_MODEL", "gnani/gnani-evon-v3.3")  # or the endpoint id the host gives
+# Stand-in until Evon access is granted: used only when the EVON_* settings are not set.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")  # fastest + most accurate in our multilingual probe
 
 # Vendor endpoints (verified 2026-10-09; see docs/m0_vendor_status.md)
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"          # Jev is a TypeSafe key

@@ -5,6 +5,8 @@
   ("కాదు" / "నా నంబర్ మారింది" → which field → new value → re-read);
 - asking the user for a missing field, reading options aloud;
 - stop ("ఆగు") and repeat ("మళ్ళీ") handling.
+
+Everything spoken comes from the session language's table (app/lang/<code>.json).
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import Awaitable, Callable
 
+from app import lang as langs
 from app.agent import answers, readback
 
 
@@ -26,16 +29,15 @@ class HandoffError(Exception):
 FORM_1 = "/portal/application/form-1"
 CORRECTION_CYCLES = 3
 FIELD_ATTEMPTS = 4                              # tries to get a usable answer for one field
-CONFIRM_KEYS = {"full_name", "phone", "dob"}    # always confirmed with an explicit yes/no
-RETRY_PREFIX = "క్షమించండి, అర్థం కాలేదు. "
-REASK_PREFIX = "సరే, మళ్ళీ చెప్పండి. "
+CONFIRM_KEYS = {"full_name", "phone", "dob", "email"}  # always confirmed: spelling matters
 
+# page path -> phrase key spoken when the agent arrives there
 PROGRESS = {
-    "/portal/dashboard": "లాగిన్ అయింది.",
-    "/portal/application/form-1": "మొదటి ఫారం నింపుతున్నాను.",
-    "/portal/application/form-2": "విద్య వివరాలు నింపుతున్నాను.",
-    "/portal/application/form-3": "చిరునామా వివరాలు నింపుతున్నాను.",
-    "/portal/application/review": "రివ్యూ పేజీకి చేరుకున్నాను.",
+    "/portal/dashboard": "progress_dashboard",
+    "/portal/application/form-1": "progress_form1",
+    "/portal/application/form-2": "progress_form2",
+    "/portal/application/form-3": "progress_form3",
+    "/portal/application/review": "progress_review",
 }
 
 
@@ -49,7 +51,9 @@ class VoiceAgent:
         on_answer: Callable[[str, str], None] | None = None,
         on_forget: Callable[[str], None] | None = None,
         trace_id: str = "",
+        language: str | None = None,
     ) -> None:
+        self.lang = langs.get(language)
         self._say = say
         self._ask = ask
         self._stop = stop_requested
@@ -66,9 +70,9 @@ class VoiceAgent:
         if path == self._last_path:
             return
         self._last_path = path
-        message = PROGRESS.get(path)
-        if message:
-            self._say(message)
+        key = PROGRESS.get(path)
+        if key:
+            self._say(self.lang.say(key))
 
     async def _ask_and_parse(self, prompt: str, kind: str) -> str:
         timeouts = 0
@@ -82,19 +86,19 @@ class VoiceAgent:
                 if timeouts >= 2:
                     raise HandoffError("no spoken answer within timeout") from exc
                 continue
-            if self._stop() or readback.is_stop(answer):
+            if self._stop() or readback.is_stop(answer, self.lang.code):
                 raise StopRequested(answer)
-            if readback.is_repeat(answer):
+            if readback.is_repeat(answer, self.lang.code):
                 self._say(prompt)
                 continue
             return answer
         raise HandoffError("no usable answer after repeats")
 
     async def _ask_value(self, field: str) -> str | None:
-        label_te = readback.FIELD_LABELS_TE.get(field, field)
+        prompt = self.lang.say("new_value", label=self.lang.label(field))
         for _ in range(2):
-            answer = await self._ask_and_parse(f"కొత్త {label_te} చెప్పండి.", "value")
-            value = readback.extract_field_value(field, answer)
+            answer = await self._ask_and_parse(prompt, "value")
+            value = readback.extract_field_value(field, answer, self.lang.code)
             if value:
                 return value
         return None
@@ -119,7 +123,11 @@ class VoiceAgent:
     async def _readback_cycle(self, profile: dict) -> dict | None:
         """Read name + phone back; handle corrections; return the updated profile."""
         for _ in range(CORRECTION_CYCLES):
-            prompt = readback.name_phone_prompt(profile.get("full_name", ""), profile.get("phone", ""))
+            prompt = self.lang.say(
+                "readback_name_phone",
+                name=profile.get("full_name", ""),
+                phone=readback.spoken_digits(profile.get("phone", ""), self.lang.code),
+            )
             answer = await self._ask_and_parse(prompt, "yes_no")
 
             profile, was_correction = await self._correction_from_answer(answer, profile)
@@ -128,22 +136,22 @@ class VoiceAgent:
                     return None
                 continue
 
-            verdict = readback.parse_yes_no(answer)
+            verdict = readback.parse_yes_no(answer, self.lang.code)
             if verdict is True:
                 return profile
             if verdict is None:
-                answer = await self._ask_and_parse("మళ్ళీ చెప్పండి. " + prompt, "yes_no")
+                answer = await self._ask_and_parse(self.lang.say("reask") + prompt, "yes_no")
                 profile, was_correction = await self._correction_from_answer(answer, profile)
                 if was_correction:
                     if profile is None:
                         return None
                     continue
-                if readback.parse_yes_no(answer) is True:
+                if readback.parse_yes_no(answer, self.lang.code) is True:
                     return profile
 
             # explicit "no" (or unclear twice): ask which field, then collect the new value
             field = readback.parse_field_choice(
-                await self._ask_and_parse("ఏది మార్చాలి? పేరు లేదా ఫోన్ నంబర్?", "field")
+                await self._ask_and_parse(self.lang.say("which_field"), "field"), self.lang.code
             )
             if field is None:
                 return None
@@ -159,28 +167,32 @@ class VoiceAgent:
     async def ask_field(self, element: dict, options: list[str]) -> str:
         """Ask for one field, parse + validate the answer, confirm or echo it, and remember it."""
         spec = answers.field_spec(element, options)
-        base = readback.options_prompt(spec.label, options) if options else readback.value_prompt(spec.label)
+        label = self.lang.label(spec.key, spec.label)
+        if options:
+            base = self.lang.say("ask_options", label=label, options=", ".join(options))
+        else:
+            base = self.lang.say("ask_value", label=label)
         prompt = base
         answer: str | None = None
         for _ in range(FIELD_ATTEMPTS):
             if answer is None:
                 answer = await self._ask_and_parse(prompt, spec.kind)
-            parsed = await answers.parse_answer(spec, answer, trace_id=self._trace_id)
+            parsed = await answers.parse_answer(spec, answer, trace_id=self._trace_id, language=self.lang.code)
             answer = None
             if parsed.value is None:
-                prompt = RETRY_PREFIX + base + answers.hint(spec)
+                prompt = self.lang.say("retry") + base + answers.hint(spec, self.lang)
                 continue
-            said = answers.spoken(spec, parsed.value)
+            said = answers.spoken(spec, parsed.value, self.lang)
             if spec.key in CONFIRM_KEYS or not parsed.confident:
-                reply = await self._ask_and_parse(f"{said}. సరేనా?", "yes_no")
-                verdict = readback.parse_yes_no(reply)
+                reply = await self._ask_and_parse(self.lang.say("confirm", value=said), "yes_no")
+                verdict = readback.parse_yes_no(reply, self.lang.code)
                 if verdict is True:
                     return self._accept(spec, parsed.value, confirmed=True)
                 if verdict is None:
                     answer = reply  # they may have just said the (corrected) value again
-                prompt = REASK_PREFIX + base
+                prompt = self.lang.say("reask") + base
                 continue
-            self._say(f"{said}, సరే.")  # echo, then move on
+            self._say(self.lang.say("echo", value=said))  # echo, then move on
             return self._accept(spec, parsed.value, confirmed=False)
         raise HandoffError(f"no usable answer for {spec.label!r}")
 
@@ -215,5 +227,5 @@ class VoiceAgent:
             return  # both were already confirmed when the user gave them
         confirmed = await self._readback_cycle(profile)
         if confirmed is None:
-            self._say(readback.READBACK_REJECTED)
+            self._say(self.lang.say("readback_rejected"))
             raise HandoffError("read-back not confirmed")

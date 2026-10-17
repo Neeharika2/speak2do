@@ -10,6 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from app import lang
 from app.agent import readback
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -28,7 +29,7 @@ def main() -> int:
         spoken,
     )
 
-    prompt = readback.name_phone_prompt("Ravi Kumar", "9876543210")
+    prompt = lang.get("te-IN").say("readback_name_phone", name="Ravi Kumar", phone=readback.spoken_digits("9876543210"))
     check("read-back prompt has name + digits + confirmation", "Ravi Kumar" in prompt and "తొమ్మిది" in prompt and "సరేనా" in prompt)
 
     check("yes parsed", readback.parse_yes_no("అవును") is True)

@@ -1,0 +1,62 @@
+{
+  "name": "English",
+  "english_name": "English",
+  "voice": "Varuni",
+  "phrases": {
+    "greeting": "Hello! I will help you fill the scholarship application. I will ask you a few details. Say \"stop\" any time to stop.",
+    "reply_done": "I have filled in the application details and reached the review page.",
+    "reply_stopped": "Stopped.",
+    "reply_handoff": "Sorry, I need your help to continue.",
+    "reply_failed": "Sorry, I could not finish the task. I need help.",
+    "reply_empty": "Sorry, I did not hear that. Please say it again.",
+    "reply_clarify": "Right now I can help with the scholarship application. Say \"start the scholarship application\".",
+    "progress_dashboard": "Logged in.",
+    "progress_form1": "Filling in the personal details.",
+    "progress_form2": "Filling in the education details.",
+    "progress_form3": "Filling in the address details.",
+    "progress_review": "Reached the review page.",
+    "ask_value": "Please say the {label}.",
+    "ask_options": "Please say the {label}. Options: {options}.",
+    "retry": "Sorry, I did not understand. ",
+    "reask": "Okay, please say it again. ",
+    "confirm": "{value}. Is that correct?",
+    "echo": "{value}, okay.",
+    "hint_digits": " Please say {n} digits.",
+    "hint_date": " Please say the day, month and year.",
+    "hint_email": " For example: sita at gmail dot com.",
+    "readback_name_phone": "Your name is {name}, phone number {phone}. Is that correct?",
+    "readback_rejected": "Okay, stopping. Please correct the details and try again.",
+    "which_field": "What should I change? Name or phone number?",
+    "new_value": "Please say the new {label}.",
+    "updated": "Okay, I updated the {labels}.",
+    "confirm_edits": "Do you want to change {changes}?"
+  },
+  "labels": {
+    "full_name": "name",
+    "phone": "phone number",
+    "email": "email",
+    "dob": "date of birth",
+    "gender": "gender",
+    "college": "college name",
+    "course": "course",
+    "year": "year of study",
+    "marks": "marks percentage",
+    "address": "address",
+    "city": "city or village",
+    "district": "district",
+    "state": "state",
+    "pin": "PIN code"
+  },
+  "words": {
+    "yes": ["yes", "yeah", "yep", "ok", "okay", "correct", "sure"],
+    "no": ["no", "nope", "not", "wrong", "incorrect"],
+    "stop": ["stop", "cancel"],
+    "repeat": ["repeat", "again", "pardon"],
+    "digits": ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"],
+    "digit_aliases": {"oh": "0"},
+    "field_words": {
+      "full_name": ["name"],
+      "phone": ["phone", "number", "mobile"]
+    }
+  }
+}

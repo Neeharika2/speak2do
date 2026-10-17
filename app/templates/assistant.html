@@ -20,6 +20,9 @@
     #status[data-state="awaiting"] { color: #b91c1c; }
     .box { background: #f0f3f8; border-radius: 8px; padding: 10px 12px; min-height: 2.4em; white-space: pre-wrap; }
     #transcript { font-size: 1.15rem; }
+    .lang-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+    .lang-row label { font-weight: 600; color: #5b6472; }
+    #language { flex: 1; font-size: 1.05rem; padding: 8px; border: 1px solid #b9c0cc; border-radius: 8px; background: #fff; }
     input[type="text"] { width: 100%; box-sizing: border-box; font-size: 1.05rem; padding: 10px; border: 1px solid #b9c0cc; border-radius: 8px; }
     .row { display: flex; gap: 8px; margin-top: 8px; }
     .row button { padding: 10px 18px; font-size: 1rem; border: 0; border-radius: 8px; background: #14213d; color: #fff; cursor: pointer; }
@@ -36,6 +39,14 @@
     <section class="card">
       <h1>Talk to the assistant</h1>
       <button id="start-button" type="button">▶ Start</button>
+      <div class="lang-row">
+        <label for="language">Language</label>
+        <select id="language">
+          {% for lang in languages %}
+          <option value="{{ lang.code }}" {% if lang.code == default_language %}selected{% endif %}>{{ lang.name }}{% if lang.name != lang.english_name %} — {{ lang.english_name }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
       <p id="status" data-state="idle">Press Start. The assistant will ask you for each detail — just answer by voice.</p>
 
       <h2>Assistant</h2>
@@ -73,6 +84,21 @@
       const audioEl = document.getElementById("reply-audio");
       const textInput = document.getElementById("text-fallback");
       const textSend = document.getElementById("text-send");
+      const languageSelect = document.getElementById("language");
+      const LANGUAGE_KEY = "voiceAssistant.language";
+      try {
+        const saved = localStorage.getItem(LANGUAGE_KEY);
+        if (saved && [...languageSelect.options].some((o) => o.value === saved)) languageSelect.value = saved;
+      } catch (err) {
+        /* storage unavailable: keep the server default */
+      }
+      languageSelect.addEventListener("change", () => {
+        try {
+          localStorage.setItem(LANGUAGE_KEY, languageSelect.value);
+        } catch (err) {
+          /* ignore */
+        }
+      });
 
       const FIELD_LABELS = {
         full_name: "Name", phone: "Phone number", email: "Email", dob: "Date of birth",
@@ -220,17 +246,20 @@
         }
         starting = false;
         conversationOn = true;
+        languageSelect.disabled = true;
         startButton.classList.add("active");
         startButton.textContent = "■ Stop";
         transcriptEl.textContent = "—";
+        // begin first: the server switches speech recognition to this language before audio flows
+        voiceWs.send(JSON.stringify({ type: "begin", language: languageSelect.value }));
         startMic();
-        voiceWs.send(JSON.stringify({ type: "begin" }));
         setStatus(STATUS_TEXT.queued, "queued");
       }
 
       function endConversation({ notifyServer }) {
         if (!conversationOn) return;
         conversationOn = false;
+        languageSelect.disabled = false;
         startButton.classList.remove("active");
         startButton.textContent = "▶ Start";
         if (notifyServer && wsOpen()) voiceWs.send(JSON.stringify({ type: "end" }));
@@ -253,6 +282,7 @@
         transcriptEl.textContent = text;
         const form = new FormData();
         form.append("text", text);
+        form.append("language", languageSelect.value);
         try {
           const response = await fetch(endpoint, { method: "POST", body: form });
           if (!response.ok) {
@@ -354,7 +384,7 @@
             wsLeftover = new Int16Array(0);
             voiceWs.send(JSON.stringify({ type: "start" }));
             if (sessionState && ACTIVE.includes(sessionState.status)) {
-              voiceWs.send(JSON.stringify({ type: "begin" }));
+              voiceWs.send(JSON.stringify({ type: "begin", language: languageSelect.value }));
             }
           }
         };
