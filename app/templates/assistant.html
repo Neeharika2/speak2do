@@ -35,8 +35,8 @@
   <main>
     <section class="card">
       <h1>Talk to the assistant</h1>
-      <button id="talk-button" type="button">🎤 Hold to talk</button>
-      <p id="status" data-state="idle">Ready — hold the button and speak, or quick-tap to start hands-free.</p>
+      <button id="talk-button" type="button">🎤 Tap to talk</button>
+      <p id="status" data-state="idle">Ready — tap the button and speak; tap again to send.</p>
 
       <h2>Heard</h2>
       <div id="transcript" class="box">—</div>
@@ -44,6 +44,9 @@
       <h2>Reply</h2>
       <div id="reply-text" class="box">—</div>
       <audio id="reply-audio" controls></audio>
+
+      <h2>Updated fields</h2>
+      <div id="updated" class="box">—</div>
 
       <h2>Or type (fallback)</h2>
       <input id="text-fallback" type="text" placeholder="e.g. Scholarship application cheyyi">
@@ -64,11 +67,19 @@
       const statusEl = document.getElementById("status");
       const transcriptEl = document.getElementById("transcript");
       const replyEl = document.getElementById("reply-text");
+      const updatedEl = document.getElementById("updated");
       const liveImg = document.getElementById("live");
       const stepsEl = document.getElementById("steps");
       const audioEl = document.getElementById("reply-audio");
       const textInput = document.getElementById("text-fallback");
       const textSend = document.getElementById("text-send");
+
+      const FIELD_LABELS = {
+        full_name: "Name", phone: "Phone number", email: "Email", dob: "Date of birth",
+        gender: "Gender", college: "College", course: "Course", year: "Year of study",
+        marks: "Marks", address: "Address", city: "City / village", district: "District",
+        state: "State", pin: "PIN code",
+      };
 
       let mediaStream = null;
       let audioContext = null;
@@ -78,14 +89,12 @@
       let chunks = [];
       let recording = false;
       let starting = false;
-      let handsFree = false;
-      let buttonDown = false;
-      let pressStartedAt = 0;
       let autoStopTimer = null;
       let currentSession = null;
       let pollTimer = null;
       let sessionState = null;
       let lastSpeechId = 0;
+      let liveTranscript = "";
       let voiceWs = null;
       let wsReady = false;
       let wsLeftover = new Int16Array(0);
@@ -100,7 +109,7 @@
         transcribing: "Listening…",
         running: "Working — watch the live view",
         speaking: "Replying…",
-        awaiting: "Waiting for your answer — hold to talk (say “Aagu” to stop)",
+        awaiting: "Waiting for your answer — tap to talk (say “Aagu” to stop)",
         done: "Done",
         error: "Something went wrong",
       };
@@ -169,7 +178,6 @@
         chunks = [];
         recording = true;
         starting = false;
-        handsFree = !buttonDown;
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
         processorNode.onaudioprocess = (event) => {
@@ -199,27 +207,24 @@
         processorNode.connect(muteNode);
         muteNode.connect(audioContext.destination);
         talkButton.classList.add("recording");
+        talkButton.textContent = "⏹ Tap to send";
         autoStopTimer = setTimeout(() => stopRecording(), 30000);
         wsLeftover = new Int16Array(0);
         if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
           voiceWs.send(JSON.stringify({ type: "start" }));
         }
-        if (handsFree) {
-          setStatus("Listening… tap again to send", "recording");
-        } else {
-          setStatus("Listening… release to send", "recording");
-        }
+        setStatus("Listening… tap again to send", "recording");
       }
 
       async function stopRecording() {
         if (!recording) return;
         recording = false;
-        handsFree = false;
         if (autoStopTimer) {
           clearTimeout(autoStopTimer);
           autoStopTimer = null;
         }
         talkButton.classList.remove("recording");
+        talkButton.textContent = "🎤 Tap to talk";
         try {
           processorNode.disconnect();
           sourceNode.disconnect();
@@ -228,7 +233,7 @@
           /* already disconnected */
         }
         if (chunks.length === 0) {
-          setStatus("Nothing recorded — hold the button while speaking.", "error");
+          setStatus("Nothing recorded — tap the button and speak.", "error");
           return;
         }
         if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
@@ -255,6 +260,7 @@
 
       async function uploadCommand(wavBlob) {
         const endpoint = inputEndpoint();
+        liveTranscript = "";
         setStatus(endpoint === "/api/voice/interrupt" ? "Sending…" : "Thinking…", "queued");
         const form = new FormData();
         form.append("audio", wavBlob, "command.wav");
@@ -276,6 +282,7 @@
         const text = textInput.value.trim();
         if (!text) return;
         const endpoint = inputEndpoint();
+        liveTranscript = "";
         setStatus(endpoint === "/api/voice/interrupt" ? "Sending…" : "Thinking…", "queued");
         const form = new FormData();
         form.append("text", text);
@@ -300,6 +307,7 @@
         lastSpeechId = 0;
         wsAudioForSession = 0;
         replyEl.textContent = "";
+        updatedEl.textContent = "—";
         stepsEl.innerHTML = "";
         if (pollTimer) clearInterval(pollTimer);
         poll();
@@ -314,7 +322,7 @@
           const data = await response.json();
           sessionState = data;
           setStatus(STATUS_TEXT[data.status] || data.status, data.status);
-          transcriptEl.textContent = data.transcript || "—";
+          transcriptEl.textContent = liveTranscript || data.transcript || "—";
           const showReply = data.status === "done" || data.status === "speaking" || data.status === "error";
           replyEl.textContent = showReply
             ? data.reply_text || data.error || "—"
@@ -326,6 +334,11 @@
               audioEl.play().catch(() => {});
             }
           }
+          const updated = data.updated_fields || {};
+          const entries = Object.entries(updated);
+          updatedEl.textContent = entries.length
+            ? entries.map(([field, value]) => `${FIELD_LABELS[field] || field}: ${value}`).join("\n")
+            : "—";
           stepsEl.innerHTML = data.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
           if (data.status === "running" || data.status === "speaking" || data.status === "done") {
             liveImg.src = `/api/voice/session/${currentSession}/screenshot?ts=${Date.now()}`;
@@ -374,7 +387,11 @@
           if (data.type === "processing") {
             setStatus("Transcribing…", "transcribing");
           } else if (data.type === "transcript") {
-            transcriptEl.textContent = data.text || "—";
+            liveTranscript = data.text || "";
+            transcriptEl.textContent = liveTranscript || "—";
+          } else if (data.type === "session") {
+            // a voice-started run: bind it so status/live view/steps keep updating
+            if (data.session_id && data.session_id !== currentSession) startPolling(data.session_id);
           } else if (data.type === "audio") {
             playWsChunk(data);
           } else if (data.type === "audio_fallback") {
@@ -420,36 +437,13 @@
 
       connectVoiceWs();
 
-      function onPointerDown(event) {
-        event.preventDefault();
-        talkButton.setPointerCapture(event.pointerId);
-        buttonDown = true;
-        if (recording) {
-          if (handsFree) stopRecording();
-          return;
-        }
+      function toggleRecording() {
         if (starting) return;
-        pressStartedAt = performance.now();
-        startRecording();
+        if (recording) stopRecording();
+        else startRecording();
       }
 
-      function onPointerUp(event) {
-        event.preventDefault();
-        buttonDown = false;
-        if (!recording || starting || handsFree) return;
-        if (performance.now() - pressStartedAt >= 500) {
-          stopRecording();
-        } else {
-          handsFree = true;
-          setStatus("Listening… tap again to send", "recording");
-        }
-      }
-
-      talkButton.addEventListener("pointerdown", onPointerDown);
-      talkButton.addEventListener("pointerup", onPointerUp);
-      talkButton.addEventListener("pointercancel", () => {
-        if (!handsFree) stopRecording();
-      });
+      talkButton.addEventListener("click", toggleRecording);
       talkButton.addEventListener("contextmenu", (event) => event.preventDefault());
       textSend.addEventListener("click", sendText);
       textInput.addEventListener("keydown", (event) => {

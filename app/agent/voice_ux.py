@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Awaitable, Callable
 
 from app.agent import readback
@@ -58,8 +59,17 @@ class VoiceAgent:
             self._say(message)
 
     async def _ask_and_parse(self, prompt: str, kind: str) -> str:
+        timeouts = 0
         for _ in range(3):
-            answer = await self._ask(prompt, kind)
+            try:
+                answer = await self._ask(prompt, kind)
+            except asyncio.TimeoutError as exc:
+                # slow/quiet answer: re-ask once (the next _ask speaks again),
+                # a second timeout means nobody is answering -> hand off
+                timeouts += 1
+                if timeouts >= 2:
+                    raise HandoffError("no spoken answer within timeout") from exc
+                continue
             if readback.is_stop(answer):
                 raise StopRequested(answer)
             if readback.is_repeat(answer):

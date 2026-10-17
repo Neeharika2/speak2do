@@ -31,6 +31,13 @@ GNANI_API_KEY = os.environ.get("GNANI_API_KEY", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+# Voice intent LLM provider seam (M5): Gemini, or Gnani Evon (OpenAI-compatible).
+# Flip with VOICE_LLM_PROVIDER once Evon beta access (or a hosted endpoint) is granted.
+VOICE_LLM_PROVIDER = os.environ.get("VOICE_LLM_PROVIDER", "gemini").strip().lower()
+EVON_BASE_URL = os.environ.get("EVON_BASE_URL", "https://api.inya.ai/v1")
+EVON_API_KEY = os.environ.get("EVON_API_KEY", "")
+EVON_MODEL = os.environ.get("EVON_MODEL", "gnani-evon-v3.3")
+
 # Vendor endpoints (verified 2026-10-09; see docs/m0_vendor_status.md)
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"          # Jev is a TypeSafe key
 GNANI_STT_URL = "https://api.vachana.ai/stt/v3"

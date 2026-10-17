@@ -18,7 +18,10 @@ DIGIT_WORDS = ["సున్నా", "ఒకటి", "రెండు", "మూ�
 
 YES_WORDS = ["అవును", "అవు", "సరే", "ఓకే", "ఒప్పు", "yes", "ok", "okay", "avunu", "avnu", "sare"]
 NO_WORDS = ["కాదు", "వద్దు", "లేదు", "తప్పు", "no", "kadu", "ledu", "vaddu"]
-STOP_WORDS = ["ఆగు", "ఆగండి", "ఆపు", "ఆపండి", "ఆపేయి", "stop", "aagu", "agu", "aap"]
+STOP_WORDS = [
+    "ఆగు", "ఆగండి", "ఆపు", "ఆపండి", "ఆపేయి", "ఆపేయండి", "చాలు",
+    "stop", "aagu", "agu", "aap", "chalu", "chaalu",
+]
 REPEAT_WORDS = ["మళ్ళీ", "మళ్లీ", "మరలా", "repeat", "again"]
 
 ENGLISH_DIGITS = {
@@ -92,6 +95,18 @@ TEXT_FILLERS = [
     "నా", "మా", "మీ", "అని", "మై", "నేమ్", "ఈజ్", "ఇస్", "హాస్", "చేంజ్డ్", "చేంజ్", "టు", "నౌ",
     "my", "is", "has", "was", "been", "the", "to", "now", "it", "it's", "i", "me", "a", "an",
     "not", "wrong", "incorrect", "isn't", "aren't",
+    # instruction verbs: "నిహారిక అనిపెట్టు" (set it as …), "పేరు మార్చు" (change the name)
+    "అనిపెట్టు", "అనిపెట్టండి", "పెట్టు", "పెట్టండి", "పెట్టాలి", "మార్చు", "మార్చాలి",
+    "చేయి", "చేయండి", "అన్నాను", "చెప్పాను", "కావాలి", "మాత్రమే", "ఒక్కటే", "కూడా",
+    "తీసేసి", "తీసేయి", "తీసేయండి", "తీసివేయి", "తీసివేయండి", "బదులు", "బదులుగా",
+    "set", "make", "call", "keep", "use", "please", "only",
+]
+
+# Replacement phrasings ("remove X and set Y") carry two values in one breath.
+# Picking one out of messy STT is unreliable, so the agent asks for the new value.
+REPLACEMENT_WORDS = [
+    "తీసేసి", "తీసేయి", "తీసేయండి", "తీసివేయి", "తీసివేయండి", "తీసెయ్", "బదులు", "బదులుగా",
+    "remove", "delete", "instead", "replace",
 ]
 TEXT_STOPWORDS = {
     "is", "has", "was", "to", "it", "the", "a", "an", "now", "change", "changed", "new", "my", "me", "i",
@@ -228,6 +243,27 @@ def parse_field_choice(text: str) -> str | None:
     return None
 
 
+def _has_repeated_token(value: str) -> bool:
+    """True when a value repeats a word ("… నిహారిక … నిహారిక") — old + new mixed."""
+    seen: set[str] = set()
+    for token in normalize_text(value).split():
+        if len(token) >= 3 and token in seen:
+            return True
+        seen.add(token)
+    return False
+
+
+def _mentions_negation(text: str) -> bool:
+    """True when a value is being rejected ("పేరు సీత కాదు" = the name is not Sita).
+
+    Latin "no"/"not" needs word boundaries ("Nora", "Nolan" are names).
+    """
+    normalized = normalize_text(text)
+    if re.search(r"\b(no|not)\b", normalized):
+        return True
+    return any(word in normalized for word in ("కాదు", "వద్దు", "లేదు", "తప్పు", "kadu", "ledu", "vaddu"))
+
+
 def extract_field_value(field: str, text: str) -> str | None:
     """Pull a usable value for a corrected field out of an utterance."""
     normalized = normalize_text(text)
@@ -240,8 +276,28 @@ def extract_field_value(field: str, text: str) -> str | None:
     if field == "district":
         return match_option(normalized, DISTRICT_OPTIONS)
     if field in ("full_name", "address", "college", "email"):
-        return clean_text_value(normalized)
+        if any(word in normalized for word in REPLACEMENT_WORDS):
+            return None  # "remove X, set Y": ask for the new value instead
+        if _mentions_negation(normalized):
+            return None  # "… is not X": X is the value being rejected
+        value = clean_text_value(normalized)
+        if field == "full_name" and value and _has_repeated_token(value):
+            return None  # old and new name in one sentence: ask again
+        return value
     return None
+
+
+def _change_requested(normalized: str) -> bool:
+    """True when the utterance asks for a field to be changed."""
+    if any(word in normalized for word in CHANGE_WORDS + REPLACEMENT_WORDS):
+        return True
+    if _mentions_negation(normalized):
+        return True  # "… is not X" rejects the current value
+    # "నా ఫోన్ నంబర్ కూడా" ("my phone number too"): a field mention with "also"
+    # and no yes/no word is a change request, not agreement.
+    if "కూడా" in normalized and not any(word in normalized for word in YES_WORDS + NO_WORDS):
+        return True
+    return False
 
 
 def parse_correction(text: str) -> tuple[str, str | None] | None:
@@ -251,8 +307,9 @@ def parse_correction(text: str) -> tuple[str, str | None] | None:
     if field is None:
         return None
     value = extract_field_value(field, normalized)
-    changed = any(word in normalized for word in CHANGE_WORDS)
-    if value is None and not changed:
+    if value is None and not _change_requested(normalized):
+        if field == "full_name" and _has_repeated_token(clean_text_value(normalized) or ""):
+            return field, None  # old + new name in one sentence: ask again
         return None
     return field, value
 

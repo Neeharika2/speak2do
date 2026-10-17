@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 import websockets
+from websockets.protocol import State
 
-from app import config
+from app import config, events
 
 STT_WS_URL = "wss://api.vachana.ai/stt/v3/stream"
 TTS_WS_URL = "wss://api.vachana.ai/api/v1/tts"
@@ -74,10 +75,27 @@ class SttStream:
         self._ws = None
         self._reader: asyncio.Task | None = None
         self.error: str | None = None
+        self._closed = True
+        self._closing = False
 
     @property
     def frame_delay(self) -> float:
         return FRAME_SAMPLES / self.sample_rate
+
+    @property
+    def alive(self) -> bool:
+        """True while the socket is open and the reader has not seen a close."""
+        if self._closed or self.error is not None or self._ws is None:
+            return False
+        return self._ws.state is State.OPEN
+
+    async def ensure_connected(self) -> None:
+        """(Re)connect when the previous socket died — idle timeouts, restarts."""
+        if self.alive:
+            return
+        events.log_event("stt", "stt.reconnect", previous_error=self.error)
+        await self.close()
+        await self.connect()
 
     async def connect(self) -> None:
         if not config.GNANI_API_KEY:
@@ -89,6 +107,9 @@ class SttStream:
             "x-min-silence-ms": str(self.min_silence_ms),
         }
         self._ws = await websockets.connect(STT_WS_URL, additional_headers=headers, max_size=2**20)
+        self.error = None
+        self._closed = False
+        self._closing = False
         self._reader = asyncio.create_task(self._read_loop())
 
     async def _read_loop(self) -> None:
@@ -109,8 +130,15 @@ class SttStream:
                         await _maybe_await(self._on_processing(message))
                 elif kind == "error":
                     self.error = message.get("message")
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 — connection closed / cancelled
             self.error = str(exc)
+        finally:
+            self._closed = True
+            if not self._closing:
+                # the vendor side closed an idle/long stream: the next press reconnects
+                events.log_event("stt", "stt.stream_ended", error=self.error or "closed by server")
 
     async def send_audio(self, frame: bytes) -> None:
         if self._ws is not None:
@@ -134,10 +162,19 @@ class SttStream:
             await asyncio.sleep(self.frame_delay)
 
     async def close(self) -> None:
-        if self._reader is not None:
-            self._reader.cancel()
+        self._closing = True
+        self._closed = True
+        reader = self._reader
+        self._reader = None
+        if reader is not None:
+            reader.cancel()
+            try:
+                await reader  # let its finally run before a possible reconnect
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if self._ws is not None:
             await self._ws.close()
+            self._ws = None
 
 
 async def synthesize_stream(

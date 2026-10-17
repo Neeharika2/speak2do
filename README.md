@@ -54,13 +54,14 @@ cp .env.example .env                           # then fill in the three API keys
 .venv/bin/uvicorn app.main:app --port 8765
 ```
 
-- **Voice assistant (front door):** http://127.0.0.1:8765/ → **hold** the "Hold to talk"
-  button and speak in Telugu (e.g. "Scholarship application cheyyi"), or **quick-tap**
-  it for hands-free mode (tap again to send). The Jev-driven agent logs in, fills the
+- **Voice assistant (front door):** http://127.0.0.1:8765/ → **tap** the "Tap to talk"
+  button and speak in Telugu (e.g. "Scholarship application cheyyi"), **tap again to send**.
+  The Jev-driven agent logs in, fills the
   whole application, **asks you to confirm name and phone, and asks for missing values
   by voice** (reading the options aloud). Correct it any time: "నా నంబర్ మారింది" makes
   it ask for the new number and **re-read it back**; unrelated commands get a
-  clarification instead of running the task. Say **"ఆగు"** to stop at any time. There is
+  clarification instead of running the task. Say **"ఆగు"** to stop at any time. The
+  page's **Updated fields** panel lists every correction that was applied. There is
   also a text fallback.
 - **Missing-field demo:** start the server with
   `AGENT_PROFILE=profile/demo_profile_voice.json` (district is blank → the agent asks).
@@ -82,10 +83,13 @@ With the server running:
 .venv/bin/python scripts/agent_guards.py           # M2: budgets/no-progress guards (4 checks)
 .venv/bin/python scripts/agent_measure.py --runs 10 # M2 gate: >= 8/10 reach review
 .venv/bin/python scripts/voice_ux_check.py         # M3: read-back/parsing checks (offline)
+.venv/bin/python scripts/voice_intent_check.py     # M5: LLM intent fallback checks (offline)
+.venv/bin/python scripts/voice_unmatched.py        # M5: list utterances no layer could place
 .venv/bin/python scripts/voice_accuracy.py         # M3 gate: 30-phrase accuracy (>= 90%)
 BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_session_check.py  # M3: Q&A + Aagu
 .venv/bin/python scripts/streaming_check.py        # M4: Gnani WS adapters (TTS/STT)
 BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_ws_check.py       # M4: /ws/voice E2E
+BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_ws_ui_check.py    # M4: voice-started run shown in the UI
 ```
 
 `walking_skeleton.py` synthesizes a Telugu command, transcribes it, drives the login +
@@ -110,6 +114,9 @@ with the synthetic sample:
 ## Notes
 
 - `.env` holds real keys and is gitignored. `.env.example` documents the variables.
+- Voice intent LLM is switchable: `VOICE_LLM_PROVIDER=gemini` (default) or `evon` —
+  Gnani Evon v3.3 over an OpenAI-compatible endpoint (`EVON_BASE_URL`, `EVON_API_KEY`,
+  `EVON_MODEL`; thinking mode disabled, 300-token cap). Rules stay first either way.
 - All portal data is synthetic; passwords/OTPs are redacted in event logs.
 - Jev is a decision model (not a browser driver): the loop observes/executes,
   Jev picks actions. See `docs/m0_vendor_status.md`.

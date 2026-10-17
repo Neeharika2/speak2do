@@ -171,14 +171,23 @@ async def main() -> int:
         # ---- 3c. correction AFTER form 1 is saved: record must still update
         await client.post("/portal/__reset")
         sid = await start(client, "Scholarship application cheyyi")
-        deadline = time.monotonic() + 90
+        # Answer the interactive prompts while waiting, otherwise the run parks on
+        # the read-back and never gets past form 1.
+        last_prompt = None
+        deadline = time.monotonic() + 150
+        data = {}
         while time.monotonic() < deadline:
             data = await status(client, sid)
             if data["status"] in ("done", "error"):
                 break
             if data["status"] == "running" and len(data["steps"]) >= 13:
                 break
+            if data["awaiting_input"] and data["prompt_text"] != last_prompt:
+                last_prompt = data["prompt_text"]
+                answer = "గుంటూరు" if "District" in last_prompt else "అవును"
+                await client.post("/api/voice/answer", data={"text": answer})
             await asyncio.sleep(0.15)
+        check("run reached post-form-1 before the correction", len(data.get("steps", [])) >= 13, str(len(data.get("steps", []))))
         r1 = await client.post("/api/voice/interrupt", data={"text": "my name is wrong"})
         routed = r1.json()
         if routed.get("pending") == "full_name":

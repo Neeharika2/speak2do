@@ -76,6 +76,26 @@ def main() -> int:
     check("'my number is wrong' asks for a value", readback.parse_correction("my number is wrong") == ("phone", None))
     check("'change my name to sita' has a value", readback.parse_correction("change my name to sita") == ("full_name", "Sita"))
 
+    # "remove X and set Y" in one sentence: the instruction words must never end up
+    # inside the stored name; the agent asks for the new value instead.
+    check(
+        "replacement phrasing asks for the new name",
+        readback.parse_correction("నా పేరు నిహారిక రవికుమార్ అని తీసేసి నిహారిక అనిపెట్టు") == ("full_name", None),
+    )
+    check(
+        "old + new name without 'remove' still asks",
+        readback.parse_correction("నా పేరు నిహారిక రవికుమార్ అని, నిహారిక") == ("full_name", None),
+    )
+    check("plain new name still parses", readback.parse_correction("నా పేరు నిహారిక") == ("full_name", "నిహారిక"))
+    check("name set phrasing strips instruction words", readback.extract_field_value("full_name", "నిహారిక అనిపెట్టు") == "నిహారిక")
+    check("'name changed' in Telugu asks for a value", readback.parse_correction("నా పేరు మార్చాలి") == ("full_name", None))
+    check("field + 'కూడా' is a change request", readback.parse_correction("నా ఫోన్ నెంబర్ కూడా") == ("phone", None))
+    check("agreement with 'కూడా' is not a correction", readback.parse_correction("అవును, నా పేరు కూడా సరే") is None)
+    check("repeated 'సరే' is agreement, not a correction", readback.parse_correction("ఫోన్ నంబర్ సరే సరే") is None)
+    check("rejected name is not taken as the value", readback.extract_field_value("full_name", "నా పేరు సీత కాదు") is None)
+    check("name containing 'no' survives", readback.extract_field_value("full_name", "Nora Nandini") == "Nora Nandini")
+    check("'not' phrasing asks for a value", readback.parse_correction("my name is not ravi") == ("full_name", None))
+
     check("district alias matched", readback.match_option("మా జిల్లా గుంటూరు", ["Guntur", "Krishna"]) == "Guntur")
     check("english option matched", readback.match_option("Krishna", ["Guntur", "Krishna"]) == "Krishna")
     check("unknown option -> None (re-ask)", readback.match_option("something else", ["Guntur", "Krishna"]) is None)
