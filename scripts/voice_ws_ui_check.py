@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""UI check for voice-started runs (M4): mic -> STT -> session binding in the page.
+"""UI check for the agent-led conversation: Start -> agent asks -> hands-free mic -> Stop.
 
-Regression guard: when a run is started by voice over /ws/voice, the server
-sends {"type": "session"}; the page must bind to it so status, reply text,
-steps and the live view keep updating (before the fix the page stayed at
-"Transcribing…" forever and showed no reply).
+The Start button sends {"type": "begin"} over /ws/voice; the server replies with
+{"type": "session"} and the page must bind to it so status, prompts, steps and the
+live view keep updating. The mic streams continuously (muted while the agent talks).
 
 Uses Chromium's fake audio capture as the microphone, so no real mic is needed.
 
@@ -72,34 +71,53 @@ async def main() -> int:
         context = await browser.new_context(permissions=["microphone"])
         page = await context.new_page()
         await page.goto(f"{config.BASE_URL}/assistant", wait_until="domcontentloaded")
-        check("page loaded", await page.is_visible("#talk-button"))
+        check("page loaded", await page.is_visible("#start-button"))
         await page.wait_for_function("window.__wsReady === true", timeout=15_000)
 
-        await page.click("#talk-button")  # tap to start listening
-        await page.wait_for_timeout(300)
-        recording_label = (await page.inner_text("#talk-button")).strip()
-        await page.wait_for_timeout(4700)  # let the fake mic speak
-        await page.click("#talk-button")  # tap again to send
-        check("click toggles the talk button", "Tap to send" in recording_label, recording_label)
+        # ---- Start: the agent leads; the mic is hands-free (no tap per turn)
+        await page.click("#start-button")
+        try:  # the label flips once mic permission resolves
+            await page.wait_for_function(
+                "document.getElementById('start-button').textContent.includes('Stop')", timeout=10_000
+            )
+        except Exception:  # noqa: BLE001 — surfaced as a failed check below
+            pass
+        label = (await page.inner_text("#start-button")).strip()
+        check("start button turns into stop", "Stop" in label, label)
+        try:
+            await page.wait_for_function(
+                "document.getElementById('status').dataset.state === 'awaiting'", timeout=90_000
+            )
+            asked = True
+        except Exception:  # noqa: BLE001 — surfaced as a failed check below
+            asked = False
+        prompt = (await page.inner_text("#reply-text")).strip()
+        check("agent asks the first question by itself", asked, prompt[:60])
+        ws_audio = await page.evaluate("window.__wsAudioCount || 0")
+        check("agent speech streamed to the page", ws_audio > 0, str(ws_audio))
 
+        # the fake mic loops PHRASE; once the agent stops talking it is heard as the answer
+        try:
+            await page.wait_for_function(
+                "document.getElementById('transcript').textContent.includes('పరీక్ష')", timeout=45_000
+            )
+            heard = True
+        except Exception:  # noqa: BLE001
+            heard = False
+        transcript = (await page.inner_text("#transcript")).strip()
+        check("hands-free mic heard the user", heard, transcript[:60])
+
+        # ---- Stop button halts the run
+        await page.click("#start-button")
         state = ""
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             state = await page.get_attribute("#status", "data-state") or ""
             if state in ("done", "error"):
                 break
             await page.wait_for_timeout(300)
-
-        transcript = (await page.inner_text("#transcript")).strip()
-        reply = (await page.inner_text("#reply-text")).strip()
-        ws_audio = await page.evaluate("window.__wsAudioCount || 0")
-        steps = await page.eval_on_selector_all("#steps li", "els => els.length")
-
-        check("voice run finished (page kept polling)", state == "done", state)
-        check("ws transcript shown", "పరీక్ష" in transcript, transcript[:60])
-        check("reply shown in the page", "scholarship application" in reply, reply[:60])
-        check("tts audio streamed to the page", ws_audio > 0, str(ws_audio))
-        check("unrelated command ran no agent steps", steps == 0, str(steps))
+        label = (await page.inner_text("#start-button")).strip()
+        check("stop button ends the run", state == "done" and "Start" in label, f"{state} / {label}")
 
         # ---- updated fields panel: a mid-run correction must show up
         await page.fill("#text-fallback", "Scholarship application cheyyi")

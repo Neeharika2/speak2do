@@ -5,8 +5,8 @@ Opens /assistant, sends the command via the text fallback, answers read-back /
 missing-field prompts, and verifies the whole loop: live-view frame, reply audio,
 and a completed agent run.
 
-Prereqs:
-    BASE_URL=http://127.0.0.1:8765 .venv/bin/uvicorn app.main:app --port 8765
+Prereqs (demo profile: only district is asked):
+    AGENT_PROFILE=profile/demo_profile_voice.json BASE_URL=http://127.0.0.1:8765 .venv/bin/uvicorn app.main:app --port 8765
 Run:
     BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/ui_smoke.py
 """
@@ -37,7 +37,7 @@ async def main() -> int:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto(f"{config.BASE_URL}/assistant", wait_until="domcontentloaded")
-        assert await page.is_visible("#talk-button"), "talk button missing"
+        assert await page.is_visible("#start-button"), "start button missing"
         assert await page.is_visible("#text-fallback"), "text fallback missing"
 
         await page.fill("#text-fallback", "Scholarship application cheyyi")

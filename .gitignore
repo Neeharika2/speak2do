@@ -15,3 +15,6 @@ data/
 spikes/audio/
 
 /tmp/
+
+# Local review / fix-plan notes
+REVIEW_FIXES.md

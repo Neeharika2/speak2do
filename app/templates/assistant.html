@@ -12,12 +12,12 @@
     .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08); }
     h1 { font-size: 1.3rem; margin: 0 0 12px; }
     h2 { font-size: 0.95rem; margin: 18px 0 8px; color: #5b6472; text-transform: uppercase; letter-spacing: 0.04em; }
-    #talk-button { width: 100%; padding: 26px; font-size: 1.3rem; font-weight: 700; border: 0; border-radius: 14px; background: #1f6feb; color: #fff; cursor: pointer; touch-action: none; user-select: none; }
-    #talk-button.recording { background: #d13438; }
+    #start-button { width: 100%; padding: 26px; font-size: 1.3rem; font-weight: 700; border: 0; border-radius: 14px; background: #1f6feb; color: #fff; cursor: pointer; touch-action: manipulation; user-select: none; }
+    #start-button.active { background: #d13438; }
     #status { font-weight: 600; margin: 12px 0 0; min-height: 1.4em; }
     #status[data-state="error"] { color: #9b1c1c; }
     #status[data-state="done"] { color: #166534; }
-    #status[data-state="recording"] { color: #b91c1c; }
+    #status[data-state="awaiting"] { color: #b91c1c; }
     .box { background: #f0f3f8; border-radius: 8px; padding: 10px 12px; min-height: 2.4em; white-space: pre-wrap; }
     #transcript { font-size: 1.15rem; }
     input[type="text"] { width: 100%; box-sizing: border-box; font-size: 1.05rem; padding: 10px; border: 1px solid #b9c0cc; border-radius: 8px; }
@@ -35,21 +35,21 @@
   <main>
     <section class="card">
       <h1>Talk to the assistant</h1>
-      <button id="talk-button" type="button">🎤 Tap to talk</button>
-      <p id="status" data-state="idle">Ready — tap the button and speak; tap again to send.</p>
+      <button id="start-button" type="button">▶ Start</button>
+      <p id="status" data-state="idle">Press Start. The assistant will ask you for each detail — just answer by voice.</p>
 
-      <h2>Heard</h2>
-      <div id="transcript" class="box">—</div>
-
-      <h2>Reply</h2>
+      <h2>Assistant</h2>
       <div id="reply-text" class="box">—</div>
       <audio id="reply-audio" controls></audio>
 
-      <h2>Updated fields</h2>
+      <h2>You said</h2>
+      <div id="transcript" class="box">—</div>
+
+      <h2>Your details</h2>
       <div id="updated" class="box">—</div>
 
-      <h2>Or type (fallback)</h2>
-      <input id="text-fallback" type="text" placeholder="e.g. Scholarship application cheyyi">
+      <h2>Or type your answer (fallback)</h2>
+      <input id="text-fallback" type="text" placeholder="Type an answer when the mic is not available">
       <div class="row"><button id="text-send" type="button">Send</button></div>
     </section>
 
@@ -63,7 +63,7 @@
 
   <script>
     (() => {
-      const talkButton = document.getElementById("talk-button");
+      const startButton = document.getElementById("start-button");
       const statusEl = document.getElementById("status");
       const transcriptEl = document.getElementById("transcript");
       const replyEl = document.getElementById("reply-text");
@@ -80,16 +80,18 @@
         marks: "Marks", address: "Address", city: "City / village", district: "District",
         state: "State", pin: "PIN code",
       };
+      const SAMPLE_RATE = 48000;     // the STT stream is opened at 48 kHz (server side)
+      const FRAME_SAMPLES = 512;     // Gnani needs exactly 512-sample PCM16 frames
+      const ECHO_TAIL_S = 0.35;      // keep the mic muted briefly after the agent stops talking
+      const ACTIVE = ["queued", "transcribing", "running", "speaking", "awaiting"];
 
       let mediaStream = null;
-      let audioContext = null;
+      let audioContext = null;       // one context: mic capture + agent speech playback
       let sourceNode = null;
       let processorNode = null;
       let muteNode = null;
-      let chunks = [];
-      let recording = false;
+      let conversationOn = false;
       let starting = false;
-      let autoStopTimer = null;
       let currentSession = null;
       let pollTimer = null;
       let sessionState = null;
@@ -99,17 +101,15 @@
       let wsReady = false;
       let wsLeftover = new Int16Array(0);
       let wsAudioForSession = 0;
-      const wsAudioSlots = {
-        speech: { id: 0, nextTime: 0, ctx: null },
-        reply: { id: 0, nextTime: 0, ctx: null },
-      };
+      let speakingUntil = 0;         // audioContext time when queued agent speech ends
+      const speechSlots = { speech: { id: 0, nextTime: 0 }, reply: { id: 0, nextTime: 0 } };
 
       const STATUS_TEXT = {
-        queued: "Thinking…",
+        queued: "Starting…",
         transcribing: "Listening…",
         running: "Working — watch the live view",
-        speaking: "Replying…",
-        awaiting: "Waiting for your answer — tap to talk (say “Aagu” to stop)",
+        speaking: "Assistant is speaking…",
+        awaiting: "Your turn — speak your answer",
         done: "Done",
         error: "Something went wrong",
       };
@@ -125,165 +125,132 @@
         return div.innerHTML;
       }
 
-      async function ensureMic() {
-        if (mediaStream) return;
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-        });
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      function agentSpeaking() {
+        const queued = audioContext && audioContext.currentTime < speakingUntil + ECHO_TAIL_S;
+        return Boolean(queued || !audioEl.paused);
       }
 
-      function encodeWav(chunkList, sampleRate) {
-        let frames = 0;
-        for (const chunk of chunkList) frames += chunk.length;
-        const buffer = new ArrayBuffer(44 + frames * 2);
-        const view = new DataView(buffer);
-        const writeString = (offset, text) => {
-          for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
-        };
-        writeString(0, "RIFF");
-        view.setUint32(4, 36 + frames * 2, true);
-        writeString(8, "WAVE");
-        writeString(12, "fmt ");
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true);
-        view.setUint16(22, 1, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true);
-        view.setUint16(32, 2, true);
-        view.setUint16(34, 16, true);
-        writeString(36, "data");
-        view.setUint32(40, frames * 2, true);
-        let offset = 44;
-        for (const chunk of chunkList) {
-          for (let i = 0; i < chunk.length; i += 1) {
-            const sample = Math.max(-1, Math.min(1, chunk[i]));
-            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-            offset += 2;
+      function wsOpen() {
+        return wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN;
+      }
+
+      // ------------------------------------------------------------------ mic (hands-free)
+
+      async function ensureAudio() {
+        if (!mediaStream) {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+          });
+        }
+        if (!audioContext) {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          try {
+            audioContext = new Ctx({ sampleRate: SAMPLE_RATE });
+          } catch (err) {
+            audioContext = new Ctx();
           }
         }
-        return new Blob([view], { type: "audio/wav" });
+        if (audioContext.state === "suspended") await audioContext.resume();
       }
 
-      async function startRecording() {
-        if (recording || starting) return;
-        starting = true;
-        try {
-          await ensureMic();
-        } catch (err) {
-          starting = false;
-          setStatus("Microphone unavailable — use the text box below.", "error");
-          return;
+      function toPcm16(input) {
+        const out = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i += 1) {
+          const sample = Math.max(-1, Math.min(1, input[i]));
+          out[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
         }
-        chunks = [];
-        recording = true;
-        starting = false;
+        return out;
+      }
+
+      function sendFrames(int16) {
+        const merged = new Int16Array(wsLeftover.length + int16.length);
+        merged.set(wsLeftover, 0);
+        merged.set(int16, wsLeftover.length);
+        let offset = 0;
+        while (merged.length - offset >= FRAME_SAMPLES) {
+          voiceWs.send(merged.slice(offset, offset + FRAME_SAMPLES).buffer);
+          offset += FRAME_SAMPLES;
+        }
+        wsLeftover = merged.slice(offset);
+      }
+
+      function startMic() {
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processorNode = audioContext.createScriptProcessor(4096, 1, 1);
         processorNode.onaudioprocess = (event) => {
-          if (!recording) return;
+          if (!conversationOn || !wsOpen()) return;
           const input = event.inputBuffer.getChannelData(0);
-          chunks.push(new Float32Array(input));
-          if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
-            const int16 = new Int16Array(input.length);
-            for (let i = 0; i < input.length; i += 1) {
-              const sample = Math.max(-1, Math.min(1, input[i]));
-              int16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-            }
-            const merged = new Int16Array(wsLeftover.length + int16.length);
-            merged.set(wsLeftover, 0);
-            merged.set(int16, wsLeftover.length);
-            let offset = 0;
-            while (merged.length - offset >= 512) {
-              voiceWs.send(merged.slice(offset, offset + 512).buffer);
-              offset += 512;
-            }
-            wsLeftover = merged.slice(offset);
-          }
+          // Half-duplex: while the assistant talks, send silence so it never hears itself.
+          sendFrames(agentSpeaking() ? new Int16Array(input.length) : toPcm16(input));
         };
         muteNode = audioContext.createGain();
         muteNode.gain.value = 0;
         sourceNode.connect(processorNode);
         processorNode.connect(muteNode);
         muteNode.connect(audioContext.destination);
-        talkButton.classList.add("recording");
-        talkButton.textContent = "⏹ Tap to send";
-        autoStopTimer = setTimeout(() => stopRecording(), 30000);
         wsLeftover = new Int16Array(0);
-        if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
-          voiceWs.send(JSON.stringify({ type: "start" }));
-        }
-        setStatus("Listening… tap again to send", "recording");
+        voiceWs.send(JSON.stringify({ type: "start" }));
       }
 
-      async function stopRecording() {
-        if (!recording) return;
-        recording = false;
-        if (autoStopTimer) {
-          clearTimeout(autoStopTimer);
-          autoStopTimer = null;
-        }
-        talkButton.classList.remove("recording");
-        talkButton.textContent = "🎤 Tap to talk";
+      function stopMic() {
         try {
-          processorNode.disconnect();
-          sourceNode.disconnect();
-          muteNode.disconnect();
+          if (processorNode) processorNode.disconnect();
+          if (sourceNode) sourceNode.disconnect();
+          if (muteNode) muteNode.disconnect();
         } catch (err) {
           /* already disconnected */
         }
-        if (chunks.length === 0) {
-          setStatus("Nothing recorded — tap the button and speak.", "error");
-          return;
-        }
-        if (wsReady && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
-          if (wsLeftover.length > 0) {
-            const padded = new Int16Array(512);
-            padded.set(wsLeftover);
-            voiceWs.send(padded.buffer);
-            wsLeftover = new Int16Array(0);
-          }
-          voiceWs.send(JSON.stringify({ type: "stop" }));
-          setStatus("Transcribing…", "transcribing");
-          return;
-        }
-        const wav = encodeWav(chunks, audioContext.sampleRate);
-        await uploadCommand(wav);
+        processorNode = sourceNode = muteNode = null;
+        if (wsOpen()) voiceWs.send(JSON.stringify({ type: "stop" }));
       }
+
+      async function startConversation() {
+        if (conversationOn || starting) return;
+        if (!wsOpen()) {
+          setStatus("Voice connection not ready yet — try again in a moment, or type below.", "error");
+          return;
+        }
+        starting = true;
+        try {
+          await ensureAudio();
+        } catch (err) {
+          starting = false;
+          setStatus("Microphone unavailable — allow mic access, or type your answers below.", "error");
+          return;
+        }
+        starting = false;
+        conversationOn = true;
+        startButton.classList.add("active");
+        startButton.textContent = "■ Stop";
+        transcriptEl.textContent = "—";
+        startMic();
+        voiceWs.send(JSON.stringify({ type: "begin" }));
+        setStatus(STATUS_TEXT.queued, "queued");
+      }
+
+      function endConversation({ notifyServer }) {
+        if (!conversationOn) return;
+        conversationOn = false;
+        startButton.classList.remove("active");
+        startButton.textContent = "▶ Start";
+        if (notifyServer && wsOpen()) voiceWs.send(JSON.stringify({ type: "end" }));
+        stopMic();
+      }
+
+      // ------------------------------------------------------------------ text fallback
 
       function inputEndpoint() {
         if (sessionState && sessionState.awaiting_input) return "/api/voice/answer";
-        const active = sessionState && ["queued", "transcribing", "running", "speaking", "awaiting"].includes(sessionState.status);
-        if (active) return "/api/voice/interrupt";
+        if (sessionState && ACTIVE.includes(sessionState.status)) return "/api/voice/interrupt";
         return "/api/voice/command";
-      }
-
-      async function uploadCommand(wavBlob) {
-        const endpoint = inputEndpoint();
-        liveTranscript = "";
-        setStatus(endpoint === "/api/voice/interrupt" ? "Sending…" : "Thinking…", "queued");
-        const form = new FormData();
-        form.append("audio", wavBlob, "command.wav");
-        try {
-          const response = await fetch(endpoint, { method: "POST", body: form });
-          if (!response.ok) {
-            const detail = await response.json().catch(() => ({}));
-            setStatus(detail.detail || "Upload failed.", "error");
-            return;
-          }
-          const data = await response.json();
-          if (endpoint === "/api/voice/command") startPolling(data.session_id);
-        } catch (err) {
-          setStatus("Upload failed: " + err.message, "error");
-        }
       }
 
       async function sendText() {
         const text = textInput.value.trim();
         if (!text) return;
         const endpoint = inputEndpoint();
-        liveTranscript = "";
-        setStatus(endpoint === "/api/voice/interrupt" ? "Sending…" : "Thinking…", "queued");
+        liveTranscript = text;
+        transcriptEl.textContent = text;
         const form = new FormData();
         form.append("text", text);
         try {
@@ -301,17 +268,29 @@
         }
       }
 
+      // ------------------------------------------------------------------ session polling
+
       function startPolling(sessionId) {
         currentSession = sessionId;
         sessionState = null;
         lastSpeechId = 0;
         wsAudioForSession = 0;
-        replyEl.textContent = "";
+        replyEl.textContent = "—";
         updatedEl.textContent = "—";
         stepsEl.innerHTML = "";
         if (pollTimer) clearInterval(pollTimer);
         poll();
         pollTimer = setInterval(poll, 800);
+      }
+
+      function showStatus(data) {
+        if (data.status === "awaiting" && agentSpeaking()) {
+          setStatus(STATUS_TEXT.speaking, "awaiting");
+        } else if (data.status === "awaiting") {
+          setStatus(STATUS_TEXT.awaiting, "awaiting");
+        } else {
+          setStatus(STATUS_TEXT[data.status] || data.status, data.status);
+        }
       }
 
       async function poll() {
@@ -321,7 +300,7 @@
           if (!response.ok) return;
           const data = await response.json();
           sessionState = data;
-          setStatus(STATUS_TEXT[data.status] || data.status, data.status);
+          showStatus(data);
           transcriptEl.textContent = liveTranscript || data.transcript || "—";
           const showReply = data.status === "done" || data.status === "speaking" || data.status === "error";
           replyEl.textContent = showReply
@@ -334,18 +313,18 @@
               audioEl.play().catch(() => {});
             }
           }
-          const updated = data.updated_fields || {};
-          const entries = Object.entries(updated);
+          const entries = Object.entries(data.updated_fields || {});
           updatedEl.textContent = entries.length
             ? entries.map(([field, value]) => `${FIELD_LABELS[field] || field}: ${value}`).join("\n")
             : "—";
           stepsEl.innerHTML = data.steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
-          if (data.status === "running" || data.status === "speaking" || data.status === "done") {
+          if (["running", "awaiting", "speaking", "done"].includes(data.status)) {
             liveImg.src = `/api/voice/session/${currentSession}/screenshot?ts=${Date.now()}`;
           }
           if (data.status === "done" || data.status === "error") {
             clearInterval(pollTimer);
             pollTimer = null;
+            endConversation({ notifyServer: false });
             if (data.status === "done" && (!wsReady || wsAudioForSession === 0)) {
               audioEl.src = `/api/voice/session/${currentSession}/audio?ts=${Date.now()}`;
               audioEl.play().catch(() => {});
@@ -355,6 +334,8 @@
           /* transient; keep polling */
         }
       }
+
+      // ------------------------------------------------------------------ voice socket
 
       function connectVoiceWs() {
         try {
@@ -368,6 +349,14 @@
         voiceWs.onopen = () => {
           wsReady = true;
           window.__wsReady = true;
+          if (conversationOn) {
+            // reconnected mid-conversation: resume streaming and re-bind the session
+            wsLeftover = new Int16Array(0);
+            voiceWs.send(JSON.stringify({ type: "start" }));
+            if (sessionState && ACTIVE.includes(sessionState.status)) {
+              voiceWs.send(JSON.stringify({ type: "begin" }));
+            }
+          }
         };
         voiceWs.onclose = () => {
           wsReady = false;
@@ -384,13 +373,10 @@
           } catch (err) {
             return;
           }
-          if (data.type === "processing") {
-            setStatus("Transcribing…", "transcribing");
-          } else if (data.type === "transcript") {
+          if (data.type === "transcript") {
             liveTranscript = data.text || "";
             transcriptEl.textContent = liveTranscript || "—";
           } else if (data.type === "session") {
-            // a voice-started run: bind it so status/live view/steps keep updating
             if (data.session_id && data.session_id !== currentSession) startPolling(data.session_id);
           } else if (data.type === "audio") {
             playWsChunk(data);
@@ -404,10 +390,9 @@
 
       function playWsChunk(message) {
         window.__wsAudioCount = (window.__wsAudioCount || 0) + 1;
+        if (!audioContext) return; // no Start press (text-only): poll() plays the saved file instead
         wsAudioForSession += 1;
-        const slot = wsAudioSlots[message.kind] || wsAudioSlots.speech;
-        const ctx = slot.ctx || (slot.ctx = new (window.AudioContext || window.webkitAudioContext)());
-        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        const slot = speechSlots[message.kind] || speechSlots.speech;
         if (slot.id !== message.id) {
           slot.id = message.id;
           slot.nextTime = 0;
@@ -418,14 +403,15 @@
         const samples = new Int16Array(bytes.buffer);
         const floats = new Float32Array(samples.length);
         for (let i = 0; i < samples.length; i += 1) floats[i] = samples[i] / 32768;
-        const buffer = ctx.createBuffer(1, floats.length, message.sample_rate || 48000);
+        const buffer = audioContext.createBuffer(1, floats.length, message.sample_rate || SAMPLE_RATE);
         buffer.copyToChannel(floats, 0);
-        const source = ctx.createBufferSource();
+        const source = audioContext.createBufferSource();
         source.buffer = buffer;
-        source.connect(ctx.destination);
-        const startAt = Math.max(ctx.currentTime + 0.02, slot.nextTime);
+        source.connect(audioContext.destination);
+        const startAt = Math.max(audioContext.currentTime + 0.02, slot.nextTime);
         source.start(startAt);
         slot.nextTime = startAt + buffer.duration;
+        speakingUntil = Math.max(speakingUntil, slot.nextTime);
       }
 
       function playFallbackAudio(kind) {
@@ -437,14 +423,10 @@
 
       connectVoiceWs();
 
-      function toggleRecording() {
-        if (starting) return;
-        if (recording) stopRecording();
-        else startRecording();
-      }
-
-      talkButton.addEventListener("click", toggleRecording);
-      talkButton.addEventListener("contextmenu", (event) => event.preventDefault());
+      startButton.addEventListener("click", () => {
+        if (conversationOn) endConversation({ notifyServer: true });
+        else startConversation();
+      });
       textSend.addEventListener("click", sendText);
       textInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter") sendText();

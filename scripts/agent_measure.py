@@ -24,7 +24,10 @@ if str(REPO_ROOT) not in sys.path:
 import httpx
 
 from app import config, events
+from app.agent import values
 from app.agent.loop import run_agent_goal
+
+DEMO = values.load_profile(values.DEMO_PROFILE)  # no voice here: values come from the demo profile
 
 GOAL = config.AGENT_GOAL
 
@@ -47,6 +50,7 @@ async def main() -> int:
                 trace_id=trace_id,
                 start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
                 success_url=config.AGENT_SUCCESS_PATH,
+                profile=DEMO,
                 max_actions=args.max_actions,
                 max_seconds=args.max_seconds,
             )

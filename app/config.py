@@ -47,7 +47,8 @@ GNANI_TTS_URL = "https://api.vachana.ai/api/v1/tts/inference"
 DEFAULT_LANGUAGE = os.environ.get("AGENT_LANGUAGE", "te-IN")
 DEFAULT_VOICE = os.environ.get("AGENT_VOICE", "Varuni")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
-AGENT_PROFILE = os.environ.get("AGENT_PROFILE", "profile/demo_profile.json")
+# Optional pre-filled values. Empty (default) = the agent asks the user for every field.
+AGENT_PROFILE = os.environ.get("AGENT_PROFILE", "")
 
 # Task definition (change here, not in the API module)
 AGENT_GOAL = os.environ.get(

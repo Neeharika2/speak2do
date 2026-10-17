@@ -34,7 +34,7 @@ spikes/
   stt_spike.py          M0 STT spike runner (5 recorded phrases)
   phrases.md            what to record + expected entities
   RECORDING_GUIDE.md    how to record and run
-profile/demo_profile.json   synthetic profile used by the agent
+profile/demo_profile.json   optional synthetic profile (AGENT_PROFILE); scripts use it
 profile/demo_profile_voice.json  voice-demo profile (district blank -> agent asks by voice)
 phases/               phase-by-phase build log (phase1.md = M0, phase2.md = M1, ...)
 ```
@@ -54,17 +54,16 @@ cp .env.example .env                           # then fill in the three API keys
 .venv/bin/uvicorn app.main:app --port 8765
 ```
 
-- **Voice assistant (front door):** http://127.0.0.1:8765/ → **tap** the "Tap to talk"
-  button and speak in Telugu (e.g. "Scholarship application cheyyi"), **tap again to send**.
-  The Jev-driven agent logs in, fills the
-  whole application, **asks you to confirm name and phone, and asks for missing values
-  by voice** (reading the options aloud). Correct it any time: "నా నంబర్ మారింది" makes
-  it ask for the new number and **re-read it back**; unrelated commands get a
-  clarification instead of running the task. Say **"ఆగు"** to stop at any time. The
-  page's **Updated fields** panel lists every correction that was applied. There is
-  also a text fallback.
-- **Missing-field demo:** start the server with
-  `AGENT_PROFILE=profile/demo_profile_voice.json` (district is blank → the agent asks).
+- **Voice assistant (front door):** http://127.0.0.1:8765/ → press **Start**. The
+  assistant greets you, logs in to the portal and **asks you for every field** (name,
+  date of birth, phone, …), reading the options aloud for dropdowns. Just answer — the
+  mic is hands-free and muted while the assistant speaks. It reads your name and phone
+  back for confirmation; correct anything with e.g. "నా నంబర్ మారింది". Say **"ఆగు"** or
+  press **Stop** to halt. The **Your details** panel shows every value you gave. There
+  is also a text box for typing answers.
+- **Pre-filled demo:** by default nothing is pre-filled. Start the server with
+  `AGENT_PROFILE=profile/demo_profile.json` (everything known) or
+  `AGENT_PROFILE=profile/demo_profile_voice.json` (only district is asked) to skip questions.
 - **Mock portal (the agent's practice target):** http://127.0.0.1:8765/portal/login
   (demo_user / demo_pass_123, OTP 246810). You normally don't need to open this — the
   agent drives it while you watch the live view.

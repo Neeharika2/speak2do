@@ -19,7 +19,10 @@ import httpx
 
 from app import config, events
 from app.agent import loop as loop_module
+from app.agent import values
 from app.agent.loop import run_agent_goal
+
+DEMO = values.load_profile(values.DEMO_PROFILE)  # no voice here: values come from the demo profile
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -37,6 +40,7 @@ async def main() -> int:
             trace_id=events.new_trace_id(),
             start_url=f"{config.PORTAL_URL}/loop-trap",
             success_url="/review",
+            profile=DEMO,
             max_actions=12,
             max_seconds=60,
         )
@@ -56,6 +60,7 @@ async def main() -> int:
             trace_id=events.new_trace_id(),
             start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
             success_url=config.AGENT_SUCCESS_PATH,
+            profile=DEMO,
             max_actions=3,
             max_seconds=60,
         )
@@ -72,6 +77,7 @@ async def main() -> int:
             trace_id=events.new_trace_id(),
             start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
             success_url=config.AGENT_SUCCESS_PATH,
+            profile=DEMO,
             max_actions=50,
             max_seconds=60,
             max_tokens=1,
@@ -95,6 +101,7 @@ async def main() -> int:
             trace_id=events.new_trace_id(),
             start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
             success_url=config.AGENT_SUCCESS_PATH,
+            profile=DEMO,
             max_actions=20,
             max_seconds=60,
         )

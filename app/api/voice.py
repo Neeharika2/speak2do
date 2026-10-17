@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from app import config, events
-from app.agent import readback
+from app.agent import readback, values
 from app.agent.loop import run_agent_goal
 from app.agent.voice_ux import VoiceAgent
 from app.portal import db as portal_db
@@ -37,7 +37,7 @@ templates = Jinja2Templates(directory=str(config.REPO_ROOT / "app" / "templates"
 
 SESSIONS_DIR = config.DATA_DIR / "sessions"
 ACTIVE_STATES = {"queued", "transcribing", "running", "speaking", "awaiting"}
-TRANSCRIPT_DEBOUNCE_S = 0.6  # aggregate VAD segments that belong to one utterance
+TRANSCRIPT_DEBOUNCE_S = 1.0  # aggregate VAD segments of one utterance (hands-free: allow short pauses)
 ANSWER_TIMEOUT_S = 30.0      # a spoken question must be answered within this window
 
 # LLM intent fallback: consulted only when the rules find nothing (budgeted).
@@ -54,6 +54,10 @@ REPLY_EMPTY = "క్షమించండి, వినిపించలేద
 REPLY_CLARIFY = (
     "నేను ఇప్పుడు scholarship application విషయంలో సహాయం చేయగలను. "
     "\"Scholarship application చేయండి\" అని చెప్పండి."
+)
+GREETING = (
+    "నమస్కారం! స్కాలర్‌షిప్ అప్లికేషన్ నింపడంలో సహాయం చేస్తాను. "
+    "కొన్ని వివరాలు అడుగుతాను. ఆపాలంటే \"ఆగు\" అనండి."
 )
 
 
@@ -128,16 +132,16 @@ def _new_session() -> Session:
         trace_id=events.new_trace_id(),
         dir=session_dir,
         created_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        base_profile=values.load_profile(),
     )
     SESSIONS[sid] = session
     return session
 
 
-def _load_profile() -> dict:
-    path = Path(config.AGENT_PROFILE)
-    if not path.is_absolute():
-        path = config.REPO_ROOT / path
-    return json.loads(path.read_text(encoding="utf-8"))
+def _remember_answer(session: Session, field: str, value: str) -> None:
+    """Store a value the user gave by voice; the agent fills it from here on."""
+    session.overrides[field] = value
+    events.log_event(session.trace_id, "voice.answer_stored", field=field, value=value)
 
 
 def _apply_session_correction(session: Session, field: str, value: str) -> dict:
@@ -148,9 +152,7 @@ def _apply_session_correction(session: Session, field: str, value: str) -> dict:
         portal_db.save_section(config.PORTAL_TEST_USER, {field: value})
     except Exception as exc:  # noqa: BLE001 — the correction still applies to the session
         events.log_event(session.trace_id, "voice.correction_db_error", error=str(exc))
-    merged = dict(session.base_profile)
-    merged.update(session.overrides)
-    return merged
+    return _merged_profile(session)
 
 
 async def _collect_field_value(session: Session, field: str) -> str | None:
@@ -359,90 +361,100 @@ async def _fallback_intent(session: Session, transcript: str, context: str) -> s
 # --------------------------------------------------------------------------- task runner
 
 
-async def _run_command(session: Session, audio_path: Path | None, text: str | None) -> None:
-    trace_id = session.trace_id
+async def _run_agent(session: Session) -> None:
+    """Drive the portal; the agent asks the user for every value it does not know."""
+    session.status = "running"
+    voice = VoiceAgent(
+        say=lambda message: _publish_speech(session, message),
+        ask=lambda prompt, kind: _ask(session, prompt, kind),
+        stop_requested=lambda: session.stop_flag,
+        on_correction=lambda field, value: _apply_session_correction(session, field, value),
+        on_answer=lambda field, value: _remember_answer(session, field, value),
+    )
+    result = await run_agent_goal(
+        config.AGENT_GOAL,
+        trace_id=session.trace_id,
+        start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
+        success_url=config.AGENT_SUCCESS_PATH,
+        live_dir=session.dir,
+        on_step=session.steps.append,
+        voice_io=voice,
+        stop_check=lambda: session.stop_flag,
+        profile_overrides=lambda: session.overrides,
+        profile=session.base_profile,
+    )
+    session.stop_reason = result["stop_reason"]
+    if result["stop_reason"] == "user_stop":
+        await _speak_reply(session, REPLY_STOPPED)
+    elif result["success"]:
+        await _speak_reply(session, REPLY_DONE)
+    elif result["stop_reason"] == "handoff":
+        await _speak_reply(session, REPLY_HANDOFF)
+    else:
+        events.log_event(session.trace_id, "agent.not_done", stop_reason=result["stop_reason"])
+        await _speak_reply(session, REPLY_FAILED)
+
+
+async def _run_session(session: Session, body: Awaitable[None]) -> None:
+    """Run a session body and record how it ended (done / error) for the page."""
     try:
-        if text is not None:
-            transcript = text.strip()
-            events.log_event(trace_id, "text.command", transcript=transcript)
-        else:
-            session.status = "transcribing"
-            stt_result = await stt.transcribe(audio_path)
-            transcript = stt_result["transcript"].strip()
-            events.log_event(trace_id, "stt.command", duration_ms=stt_result["latency_ms"], transcript=transcript)
-        session.transcript = transcript
-
-        if not transcript:
-            await _speak_reply(session, REPLY_EMPTY)
-        else:
-            session.base_profile = _load_profile()
-            correction = readback.parse_correction(transcript)
-            app_intent = readback.is_application_intent(transcript)
-            run_task = False
-
-            if correction is not None:
-                field, value = correction
-                if value is None:
-                    value = await _collect_field_value(session, field)
-                if value:
-                    _apply_session_correction(session, field, value)
-                    _publish_speech(session, f"సరే, {readback.FIELD_LABELS_TE.get(field, field)} నవీకరించాను.")
-                    run_task = True
-                else:
-                    session.stop_reason = "clarify"
-                    _log_unmatched(session, transcript, "correction_value")
-                    await _speak_reply(session, REPLY_FAILED)
-            elif app_intent:
-                run_task = True
-            else:
-                # rules found neither a correction nor the task intent: LLM fallback
-                outcome = await _fallback_intent(session, transcript, "command")
-                if outcome in ("edits_applied", "start_task"):
-                    run_task = True
-                elif outcome == "cancelled":
-                    session.stop_reason = "user_stop"
-                    await _speak_reply(session, REPLY_STOPPED)
-                else:
-                    session.stop_reason = "clarify"
-                    await _speak_reply(session, REPLY_CLARIFY)
-
-            if run_task:
-                session.status = "running"
-                voice = VoiceAgent(
-                    say=lambda message: _publish_speech(session, message),
-                    ask=lambda prompt, kind: _ask(session, prompt, kind),
-                    stop_requested=lambda: session.stop_flag,
-                    on_correction=lambda field, value: _apply_session_correction(session, field, value),
-                )
-                result = await run_agent_goal(
-                    config.AGENT_GOAL,
-                    trace_id=trace_id,
-                    start_url=f"{config.PORTAL_URL}{config.AGENT_START_PATH}",
-                    success_url=config.AGENT_SUCCESS_PATH,
-                    live_dir=session.dir,
-                    on_step=session.steps.append,
-                    voice_io=voice,
-                    stop_check=lambda: session.stop_flag,
-                    profile_overrides=lambda: session.overrides,
-                )
-                session.stop_reason = result["stop_reason"]
-                if result["stop_reason"] == "user_stop":
-                    await _speak_reply(session, REPLY_STOPPED)
-                elif result["success"]:
-                    await _speak_reply(session, REPLY_DONE)
-                elif result["stop_reason"] == "handoff":
-                    await _speak_reply(session, REPLY_HANDOFF)
-                else:
-                    events.log_event(trace_id, "agent.not_done", stop_reason=result["stop_reason"])
-                    await _speak_reply(session, REPLY_FAILED)
-
+        await body
         session.status = "done"
         session.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        events.log_event(trace_id, "done", ok=True)
+        events.log_event(session.trace_id, "done", ok=True)
     except Exception as exc:  # noqa: BLE001 — surface to the page
         session.status = "error"
         session.error = f"{type(exc).__name__}: {exc}"
-        events.log_event(trace_id, "error", error=session.error)
+        events.log_event(session.trace_id, "error", error=session.error)
+
+
+async def _conversation(session: Session) -> None:
+    """Start button: the agent greets the user, then asks for each field as it fills the form."""
+    events.log_event(session.trace_id, "conversation.start")
+    _publish_speech(session, GREETING)
+    await _run_agent(session)
+
+
+async def _command(session: Session, audio_path: Path | None, text: str | None) -> None:
+    """Text/WAV command (fallback path): parse the request, then run the agent."""
+    trace_id = session.trace_id
+    if text is not None:
+        transcript = text.strip()
+        events.log_event(trace_id, "text.command", transcript=transcript)
+    else:
+        session.status = "transcribing"
+        stt_result = await stt.transcribe(audio_path)
+        transcript = stt_result["transcript"].strip()
+        events.log_event(trace_id, "stt.command", duration_ms=stt_result["latency_ms"], transcript=transcript)
+    session.transcript = transcript
+
+    if not transcript:
+        await _speak_reply(session, REPLY_EMPTY)
+        return
+    correction = readback.parse_correction(transcript)
+    if correction is not None:
+        field, value = correction
+        if value is None:
+            value = await _collect_field_value(session, field)
+        if not value:
+            session.stop_reason = "clarify"
+            _log_unmatched(session, transcript, "correction_value")
+            await _speak_reply(session, REPLY_FAILED)
+            return
+        _apply_session_correction(session, field, value)
+        _publish_speech(session, f"సరే, {readback.FIELD_LABELS_TE.get(field, field)} నవీకరించాను.")
+    elif not readback.is_application_intent(transcript):
+        # rules found neither a correction nor the task intent: LLM fallback
+        outcome = await _fallback_intent(session, transcript, "command")
+        if outcome == "cancelled":
+            session.stop_reason = "user_stop"
+            await _speak_reply(session, REPLY_STOPPED)
+            return
+        if outcome not in ("edits_applied", "start_task"):
+            session.stop_reason = "clarify"
+            await _speak_reply(session, REPLY_CLARIFY)
+            return
+    await _run_agent(session)
 
 
 async def _transcribe_input(session: Session, audio: UploadFile | None, text: str | None) -> str:
@@ -520,7 +532,18 @@ async def voice_command(audio: UploadFile | None = File(None), text: str | None 
         audio_path = session.dir / "command.wav"
         audio_path.write_bytes(await audio.read())
         events.log_event(session.trace_id, "audio.received", bytes=audio_path.stat().st_size)
-    session.task = asyncio.create_task(_run_command(session, audio_path, text))
+    session.task = asyncio.create_task(_run_session(session, _command(session, audio_path, text)))
+    return {"session_id": session.id}
+
+
+@router.post("/api/voice/start")
+async def voice_start():
+    """Start an agent-led conversation (the page's Start button uses the socket; tests use this)."""
+    if _active_session():
+        raise HTTPException(status_code=409, detail="The agent is already busy with another task.")
+    session = _new_session()
+    _attach_ws(session)
+    session.task = asyncio.create_task(_run_session(session, _conversation(session)))
     return {"session_id": session.id}
 
 
@@ -624,10 +647,8 @@ async def voice_websocket(websocket: WebSocket):
     async def _route_transcript(text: str) -> None:
         session = _active_session()
         if session is None:
-            session = _new_session()
-            session.ws_send = send_json
-            session.task = asyncio.create_task(_run_command(session, None, text))
-            await send_json({"type": "session", "session_id": session.id})
+            # hands-free mic: speech outside a conversation is not a command
+            events.log_event("ws", "voice.ignored", transcript=text)
             return
         session.ws_send = send_json
         if session.awaiting:
@@ -692,7 +713,7 @@ async def voice_websocket(websocket: WebSocket):
                         except Exception as exc:  # noqa: BLE001 — upstream died; let the browser reconnect
                             events.log_event("ws", "stt.send_error", error=str(exc))
                             await send_json(
-                                {"type": "error", "message": "Speech recognition stream lost; hold to talk again."}
+                                {"type": "error", "message": "Speech recognition stream lost; reconnecting…"}
                             )
                             return
                 continue
@@ -704,7 +725,24 @@ async def voice_websocket(websocket: WebSocket):
             except json.JSONDecodeError:
                 continue
             kind = command.get("type")
-            if kind == "start":
+            if kind == "begin":
+                # Start button: agent-led conversation bound to this socket
+                session = _active_session()
+                if session is None:
+                    session = _new_session()
+                    session.task = asyncio.create_task(_run_session(session, _conversation(session)))
+                session.ws_send = send_json
+                await send_json({"type": "session", "session_id": session.id})
+            elif kind == "end":
+                # Stop button: halt the run the same way the spoken stop word does
+                session = _active_session()
+                if session is not None:
+                    session.stop_flag = True
+                    if session.answer_event is not None:
+                        session.answer_text = ""  # wake a pending question; the loop sees stop_flag
+                        session.answer_event.set()
+                    events.log_event(session.trace_id, "voice.stop_requested", source="button")
+            elif kind == "start":
                 # A long-idle Gnani stream may be closed by the vendor; reconnect
                 # before recording so the first utterance after a pause is heard.
                 try:

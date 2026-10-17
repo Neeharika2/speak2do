@@ -9,23 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import time
 from pathlib import Path
 from typing import Callable
 
-from app import config, events, policy
+from app import events, policy
 from app.agent import jev_client, llm, values
 from app.agent.observe import observe_page
 from app.agent.voice_ux import HandoffError, StopRequested
 from app.browser.controller import BrowserController
-
-PROFILE_PATH = config.REPO_ROOT / "profile" / "demo_profile.json"
-
-
-def _profile_path() -> Path:
-    path = Path(config.AGENT_PROFILE)
-    return path if path.is_absolute() else config.REPO_ROOT / path
 
 OPERATION_QUESTION = {
     "type": "choice",
@@ -218,10 +210,11 @@ async def run_agent_goal(
     voice_io: object | None = None,
     stop_check: Callable[[], bool] | None = None,
     profile_overrides: Callable[[], dict] | None = None,
+    profile: dict | None = None,
 ) -> dict:
     """Run the observe/decide/act loop until success or a budget/guard stops it."""
     started = time.monotonic()
-    base_profile = json.loads(_profile_path().read_text(encoding="utf-8"))
+    base_profile = profile if profile is not None else values.load_profile()
 
     def current_profile() -> dict:
         if profile_overrides is None:
@@ -348,7 +341,9 @@ async def run_agent_goal(
                             ).evaluate(
                                 "el => Array.from(el.options).map(o => o.text.trim()).filter(t => t && t !== 'Select')"
                             )
-                        value = await voice_io.ask_field(element["label"], options)
+                        value = await voice_io.ask_field(
+                            element["label"], options, values.label_key(element["label"])
+                        )
                     except StopRequested:
                         stop_reason = "user_stop"
                         break

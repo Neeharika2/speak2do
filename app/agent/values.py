@@ -6,7 +6,23 @@ Secrets (password, OTP) are supplied here and never sent to the model.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from app import config
+
+DEMO_PROFILE = config.REPO_ROOT / "profile" / "demo_profile.json"
+
+
+def load_profile(path: str | Path | None = None) -> dict:
+    """Known user values. No path (the default) = empty: the agent asks for everything."""
+    path = path if path is not None else config.AGENT_PROFILE
+    if not path:
+        return {}
+    path = Path(path)
+    if not path.is_absolute():
+        path = config.REPO_ROOT / path
+    return json.loads(path.read_text(encoding="utf-8"))
 
 # Specific labels first so generic keys ("name") cannot steal "college name".
 MAPPINGS: list[tuple[tuple[str, ...], str]] = [

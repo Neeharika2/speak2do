@@ -42,11 +42,13 @@ class VoiceAgent:
         ask: Callable[[str, str], Awaitable[str]],
         stop_requested: Callable[[], bool] = lambda: False,
         on_correction: Callable[[str, str], dict] | None = None,
+        on_answer: Callable[[str, str], None] | None = None,
     ) -> None:
         self._say = say
         self._ask = ask
         self._stop = stop_requested
         self._on_correction = on_correction
+        self._on_answer = on_answer
         self._last_path: str | None = None
         self._readbacks: set[str] = set()
 
@@ -70,7 +72,7 @@ class VoiceAgent:
                 if timeouts >= 2:
                     raise HandoffError("no spoken answer within timeout") from exc
                 continue
-            if readback.is_stop(answer):
+            if self._stop() or readback.is_stop(answer):
                 raise StopRequested(answer)
             if readback.is_repeat(answer):
                 self._say(prompt)
@@ -144,8 +146,14 @@ class VoiceAgent:
             profile = updated
         return None
 
-    async def ask_field(self, label: str, options: list[str]) -> str:
-        """Ask the user for a field value; read options aloud for selects."""
+    async def ask_field(self, label: str, options: list[str], key: str | None = None) -> str:
+        """Ask the user for a field value (options read aloud for selects) and remember it."""
+        value = await self._ask_field_value(label, options)
+        if key and value and self._on_answer is not None:
+            self._on_answer(key, value)  # stored once: retries and later pages never re-ask
+        return value
+
+    async def _ask_field_value(self, label: str, options: list[str]) -> str:
         if options:
             prompt = readback.options_prompt(label, options)
             answer = await self._ask_and_parse(prompt, "option")

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """End-to-end WebSocket voice check.
 
-Streams a synthesized voice command over /ws/voice (live PCM -> Gnani STT
-stream), asserts the transcript, session start and streamed TTS audio, answers
-the interactive prompts, and checks the agent reaches review.
+Sends {"type": "begin"} (the Start button) over /ws/voice, answers the agent's
+first question by voice (live PCM -> Gnani STT stream), answers the rest by text,
+and checks the transcript, the stored answer, streamed TTS and that review is reached.
 
-Server must be running (default profile):
+Server must be running (default = empty profile, so the agent asks every field):
     BASE_URL=http://127.0.0.1:8899 .venv/bin/uvicorn app.main:app --port 8899
 
 Run:
@@ -33,6 +33,13 @@ from app.voice.streaming import FRAME_SAMPLES, STREAM_SAMPLE_RATE, read_wav_pcm
 
 RESULTS: list[tuple[str, bool, str]] = []
 
+TEXT_ANSWERS = [
+    ("Date of birth", "2005-03-12"), ("Gender", "Female"), ("Mobile", "9876543210"),
+    ("Email", "sita@example.com"), ("సరేనా", "అవును"), ("College", "Govt College Hyderabad"),
+    ("Course", "UG"), ("Year", "2nd"), ("Marks", "81"), ("Address", "1-2 MG Road"),
+    ("City", "Hyderabad"), ("State", "Telangana"), ("District", "Hyderabad"), ("PIN", "500001"),
+]
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     RESULTS.append((name, bool(ok), detail))
@@ -46,20 +53,20 @@ async def main() -> int:
     async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
         await client.post("/portal/__reset")
 
-    command = await tts.speak("Scholarship application చేయండి.")
-    pcm, rate = read_wav_pcm(command["path"])
-    check("command audio ready", len(pcm) > 0 and rate == STREAM_SAMPLE_RATE, f"{len(pcm)} bytes @ {rate}")
+    spoken = await tts.speak("సీత దేవి")  # the user's spoken answer to the first question (name)
+    pcm, rate = read_wav_pcm(spoken["path"])
+    check("answer audio ready", len(pcm) > 0 and rate == STREAM_SAMPLE_RATE, f"{len(pcm)} bytes @ {rate}")
 
     transcripts: list[str] = []
     audio_chunks = 0
     session_id: str | None = None
+    spoke = False
+    voice_prompt = ""
+    voice_deadline = 0.0
     answered = 0
     data: dict = {}
 
-    async with websockets.connect(ws_url, max_size=2**22) as ws:
-        connected = json.loads(await ws.recv())
-        check("ws connected", connected.get("type") == "connected", str(connected.get("message", "")))
-
+    async def stream_answer(ws) -> None:
         await ws.send(json.dumps({"type": "start"}))
         frame_bytes = FRAME_SAMPLES * 2
         for offset in range(0, len(pcm), frame_bytes):
@@ -70,10 +77,14 @@ async def main() -> int:
             await asyncio.sleep(FRAME_SAMPLES / rate)
         await ws.send(json.dumps({"type": "stop"}))
 
+    async with websockets.connect(ws_url, max_size=2**22) as ws:
+        connected = json.loads(await ws.recv())
+        check("ws connected", connected.get("type") == "connected", str(connected.get("message", "")))
+        await ws.send(json.dumps({"type": "begin"}))  # the page's Start button
+
         async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
             deadline = time.monotonic() + 240
             while time.monotonic() < deadline:
-                # drain websocket messages
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=0.15)
                     message = json.loads(raw)
@@ -82,38 +93,39 @@ async def main() -> int:
                         transcripts.append(message.get("text", ""))
                     elif kind == "session" and session_id is None:
                         session_id = message.get("session_id")
-                    elif kind == "audio":
-                        audio_chunks += 1
-                    elif kind == "audio_fallback":
+                    elif kind in ("audio", "audio_fallback"):
                         audio_chunks += 1
                 except asyncio.TimeoutError:
                     pass
 
                 if session_id is None:
                     continue
-                response = await client.get(f"/api/voice/session/{session_id}")
-                data = response.json()
+                data = (await client.get(f"/api/voice/session/{session_id}")).json()
                 if data["status"] in ("done", "error"):
-                    # give the last audio messages a moment to arrive
-                    try:
-                        while True:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=0.3)
-                            kind = json.loads(raw).get("type")
-                            if kind in ("audio", "audio_fallback"):
-                                audio_chunks += 1
-                    except asyncio.TimeoutError:
-                        pass
                     break
-                if data["awaiting_input"]:
-                    await client.post("/api/voice/answer", data={"text": "అవును"})
-                    answered += 1
-                    await asyncio.sleep(0.4)
+                if not data["awaiting_input"]:
+                    continue
+                if not spoke:
+                    # first question: answer by voice over the socket
+                    spoke = True
+                    voice_prompt = data["prompt_text"]
+                    voice_deadline = time.monotonic() + 20  # STT + VAD + debounce take a few seconds
+                    await stream_answer(ws)
+                    continue
+                if data["prompt_text"] == voice_prompt and time.monotonic() < voice_deadline:
+                    continue  # still waiting for the spoken answer to land
+                answer = next((v for k, v in TEXT_ANSWERS if k in data["prompt_text"]), "అవును")
+                await client.post("/api/voice/answer", data={"text": answer})
+                answered += 1
+                await asyncio.sleep(0.6)
 
     heard = " | ".join(t for t in transcripts if t)
-    check("ws transcript recognized", any("స్కాలర్షిప్" in t or "అప్లికేషన్" in t for t in transcripts), heard)
-    check("ws session started", session_id is not None, str(session_id))
+    stored_name = (data.get("updated_fields") or {}).get("full_name", "")
+    check("ws session started by begin", session_id is not None, str(session_id))
+    check("spoken answer recognized over ws", any("సీత" in t for t in transcripts), heard)
+    check("spoken answer stored for the field", "సీత" in stored_name, stored_name)
     check("tts streamed over ws", audio_chunks >= 3, f"{audio_chunks} audio messages")
-    check("interactive prompts answered", answered >= 1, f"{answered}")
+    check("remaining questions answered", answered >= 10, f"{answered}")
     check("run reached review", data.get("stop_reason") == "done", str(data.get("stop_reason")))
 
     failed = [name for name, ok, _ in RESULTS if not ok]
