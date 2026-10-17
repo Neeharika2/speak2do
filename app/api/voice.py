@@ -370,6 +370,8 @@ async def _run_agent(session: Session) -> None:
         stop_requested=lambda: session.stop_flag,
         on_correction=lambda field, value: _apply_session_correction(session, field, value),
         on_answer=lambda field, value: _remember_answer(session, field, value),
+        on_forget=lambda field: session.overrides.pop(field, None),
+        trace_id=session.trace_id,
     )
     result = await run_agent_goal(
         config.AGENT_GOAL,

@@ -174,11 +174,10 @@ async def _request_gemini(prompt: str, schema: dict, timeout_s: float) -> str:
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
-async def _request_openai_compat(transcript: str, current_values: dict, timeout_s: float) -> str:
+async def _request_openai_compat(payloads: list[dict], timeout_s: float) -> str:
     """Evon v3.3 (or any OpenAI-compatible server) over /v1/chat/completions."""
     url = f"{config.EVON_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {config.EVON_API_KEY}"}
-    payloads = _openai_payloads(transcript, current_values)
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         response = await client.post(url, headers=headers, json=payloads[0])
         if response.status_code == 400 and len(payloads) > 1:
@@ -191,8 +190,30 @@ async def _request_openai_compat(transcript: str, current_values: dict, timeout_
 async def _request(transcript: str, current_values: dict, timeout_s: float) -> str:
     """Provider seam; tests monkeypatch this. Returns the raw JSON text."""
     if _provider() == "evon":
-        return await _request_openai_compat(transcript, current_values, timeout_s)
+        return await _request_openai_compat(_openai_payloads(transcript, current_values), timeout_s)
     return await _request_gemini(_prompt(transcript, current_values), _schema(), timeout_s)
+
+
+async def complete_json(prompt: str, schema: dict, timeout_s: float = INTENT_TIMEOUT_S) -> dict | None:
+    """One-shot JSON completion on the configured provider; None when unavailable or invalid.
+
+    Shared by other voice parsers (e.g. app/agent/answers.py) so there is one provider seam.
+    """
+    if os.environ.get(DISABLED_ENV) or not _api_key():
+        return None
+    if _provider() == "evon":
+        base = {
+            "model": config.EVON_MODEL,
+            "temperature": 0.0,
+            "max_tokens": INTENT_MAX_TOKENS,
+            "stream": False,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        payloads = [{**base, "chat_template_kwargs": {"enable_thinking": False}}, base]
+        raw = await _request_openai_compat(payloads, timeout_s)
+    else:
+        raw = await _request_gemini(prompt, schema, timeout_s)
+    return _loads_jsonish(raw)
 
 
 def _loads_jsonish(raw: object) -> dict | None:

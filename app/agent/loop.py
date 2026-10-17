@@ -135,17 +135,16 @@ async def _decide(goal: str, obs: dict, recent: list[str]) -> tuple[dict, int]:
 def _choose_option(options: list[dict], wanted: str) -> dict | None:
     wanted = (wanted or "").strip().lower()
     usable = [o for o in options if not o["disabled"] and o["text"] and o["text"].strip().lower() != "select"]
-    if not usable:
+    if not usable or not wanted:
         return None
     for option in usable:
         if option["text"].lower() == wanted:
             return option
-    if wanted:
-        for option in usable:
-            text = option["text"].lower()
-            if text.startswith(wanted) or wanted.startswith(text):
-                return option
-    return usable[0]
+    for option in usable:
+        text = option["text"].lower()
+        if text.startswith(wanted) or wanted.startswith(text):
+            return option
+    return None  # never guess: a wrong option is worse than asking again
 
 
 async def _perform(browser: BrowserController, element: dict, operation: str, value: str) -> None:
@@ -341,9 +340,7 @@ async def run_agent_goal(
                             ).evaluate(
                                 "el => Array.from(el.options).map(o => o.text.trim()).filter(t => t && t !== 'Select')"
                             )
-                        value = await voice_io.ask_field(
-                            element["label"], options, values.label_key(element["label"])
-                        )
+                        value = await voice_io.ask_field(element, options)
                     except StopRequested:
                         stop_reason = "user_stop"
                         break
@@ -403,6 +400,9 @@ async def run_agent_goal(
             if action_error is not None:
                 consecutive_errors += 1
                 actions.append(f"{label} [failed: {action_error}]")
+                if voice_io is not None and voice_io.forget(values.label_key(element["label"])):
+                    # the page rejected the user's answer: ask for it again instead of retrying it
+                    events.log_event(trace_id, "agent.answer_rejected", label=element["label"], error=str(action_error))
                 if consecutive_errors >= error_limit:
                     stop_reason = "action_errors"
                     break

@@ -48,6 +48,7 @@ OBSERVE_JS = """
     }
     const label = labelOf(el).slice(0, 60);
     if (el.type === 'password' || /otp/i.test(label)) value = value ? '[REDACTED]' : '';
+    const attr = (name) => el.getAttribute(name) || '';
     return {
       id: parseInt(id, 10),
       tag: el.tagName.toLowerCase(),
@@ -56,6 +57,11 @@ OBSERVE_JS = """
       label,
       value: value.slice(0, 60),
       disabled: !!el.disabled,
+      // input constraints: used to validate spoken answers (never sent to Jev)
+      constraints: {
+        pattern: attr('pattern'), maxlength: attr('maxlength'), minlength: attr('minlength'),
+        inputmode: attr('inputmode'), min: attr('min'), max: attr('max'),
+      },
     };
   }).filter((el) => !el.disabled);
   window.__agentIdSeq = seq;

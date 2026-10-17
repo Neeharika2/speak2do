@@ -26,6 +26,7 @@ scripts/
   agent_guards.py       M2: forced-loop / budgets / cost cap / no-progress (4 checks)
   agent_measure.py      M2 gate: 10 runs to review + median step time report
   voice_ux_check.py     M3: read-back / parsing / corrections / intent checks (30, offline)
+  answers_check.py      spoken answer -> valid field value + confirm/echo flow (offline)
   voice_accuracy.py     M3 gate: 30-phrase TTS->STT accuracy + read-back simulation
   voice_session_check.py M3: Q&A, corrections, intent gate, "Aagu" halt (25 checks)
   streaming_check.py    M4: Gnani WS adapters — streamed TTS chunks + streamed STT (6 checks)
@@ -82,6 +83,7 @@ With the server running:
 .venv/bin/python scripts/agent_guards.py           # M2: budgets/no-progress guards (4 checks)
 .venv/bin/python scripts/agent_measure.py --runs 10 # M2 gate: >= 8/10 reach review
 .venv/bin/python scripts/voice_ux_check.py         # M3: read-back/parsing checks (offline)
+.venv/bin/python scripts/answers_check.py          # per-field answer parsing + confirm flow (offline)
 .venv/bin/python scripts/voice_intent_check.py     # M5: LLM intent fallback checks (offline)
 .venv/bin/python scripts/voice_unmatched.py        # M5: list utterances no layer could place
 .venv/bin/python scripts/voice_accuracy.py         # M3 gate: 30-phrase accuracy (>= 90%)

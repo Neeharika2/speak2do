@@ -119,23 +119,29 @@ async def main() -> int:
         label = (await page.inner_text("#start-button")).strip()
         check("stop button ends the run", state == "done" and "Start" in label, f"{state} / {label}")
 
-        # ---- updated fields panel: a mid-run correction must show up
+        # ---- "Your details" panel: a cleaned, confirmed answer must show up
         await page.fill("#text-fallback", "Scholarship application cheyyi")
         await page.click("#text-send")
         await page.wait_for_function(
             "['running','awaiting','speaking'].includes(document.getElementById('status').dataset.state)",
             timeout=45_000,
         )
-        await page.fill("#text-fallback", "నా పేరు నిహారిక")
-        await page.click("#text-send")
+        # answer the first question (name) by text, confirm it, and expect it in "Your details"
+        for reply in ("my name is sita devi", "అవును"):
+            await page.wait_for_function(
+                "document.getElementById('status').dataset.state === 'awaiting'", timeout=45_000
+            )
+            await page.fill("#text-fallback", reply)
+            await page.click("#text-send")
+            await page.wait_for_timeout(800)
         try:
             await page.wait_for_function(
-                "document.getElementById('updated').textContent.includes('నిహారిక')", timeout=30_000
+                "document.getElementById('updated').textContent.includes('Sita Devi')", timeout=30_000
             )
-            updated_text = (await page.inner_text("#updated")).strip()
         except Exception:  # noqa: BLE001 — surfaced as a failed check below
-            updated_text = (await page.inner_text("#updated")).strip()
-        check("updated fields panel shows the correction", "Name: నిహారిక" in updated_text, updated_text[:60])
+            pass
+        updated_text = (await page.inner_text("#updated")).strip()
+        check("typed answer cleaned, confirmed and shown", "Name: Sita Devi" in updated_text, updated_text[:60])
 
         await page.fill("#text-fallback", "ఆగు")  # stop the run cleanly
         await page.click("#text-send")

@@ -18,9 +18,10 @@ DIGIT_WORDS = ["సున్నా", "ఒకటి", "రెండు", "మూ�
 
 YES_WORDS = ["అవును", "అవు", "సరే", "ఓకే", "ఒప్పు", "yes", "ok", "okay", "avunu", "avnu", "sare"]
 NO_WORDS = ["కాదు", "వద్దు", "లేదు", "తప్పు", "no", "kadu", "ledu", "vaddu"]
+# Latin entries match whole words only. Not here: "aap" (Hindi "you"), "chalu" (Hindi "start").
 STOP_WORDS = [
     "ఆగు", "ఆగండి", "ఆపు", "ఆపండి", "ఆపేయి", "ఆపేయండి", "చాలు",
-    "stop", "aagu", "agu", "aap", "chalu", "chaalu",
+    "stop", "aagu",
 ]
 REPEAT_WORDS = ["మళ్ళీ", "మళ్లీ", "మరలా", "repeat", "again"]
 
@@ -120,6 +121,13 @@ def normalize_text(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
+def has_word(normalized: str, word: str) -> bool:
+    """Latin words match whole words ("ok" is not in "book"); native-script words match as substrings."""
+    if word.isascii():
+        return re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", normalized) is not None
+    return word in normalized
+
+
 def spoken_digits(value: str) -> str:
     """Read digits digit-by-digit, grouped in two halves (plan §6)."""
     words = [DIGIT_WORDS[int(ch)] for ch in str(value) if ch.isdigit()]
@@ -148,21 +156,21 @@ def parse_yes_no(text: str) -> bool | None:
     normalized = normalize_text(text)
     if not normalized:
         return None
-    if any(word in normalized for word in NO_WORDS):
+    if any(has_word(normalized, word) for word in NO_WORDS):
         return False
-    if any(word in normalized for word in YES_WORDS):
+    if any(has_word(normalized, word) for word in YES_WORDS):
         return True
     return None
 
 
 def is_stop(text: str) -> bool:
     normalized = normalize_text(text)
-    return any(word in normalized for word in STOP_WORDS)
+    return any(has_word(normalized, word) for word in STOP_WORDS)
 
 
 def is_repeat(text: str) -> bool:
     normalized = normalize_text(text)
-    return any(word in normalized for word in REPEAT_WORDS)
+    return any(has_word(normalized, word) for word in REPEAT_WORDS)
 
 
 def match_option(text: str, options: list[str]) -> str | None:
@@ -177,9 +185,11 @@ def match_option(text: str, options: list[str]) -> str | None:
         for alias in OPTION_ALIASES.get(option, []):
             if alias.lower() in normalized:
                 return option
+    if len(normalized) < 3:
+        return None  # "a" must not pick "Male"
     for option in options:
         candidate = normalize_text(option)
-        if candidate and (candidate in normalized or normalized in candidate):
+        if candidate and (has_word(normalized, candidate) or normalized in candidate):
             return option
     return None
 

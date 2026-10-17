@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Awaitable, Callable
 
-from app.agent import readback
+from app.agent import answers, readback
 
 
 class StopRequested(Exception):
@@ -25,6 +25,10 @@ class HandoffError(Exception):
 
 FORM_1 = "/portal/application/form-1"
 CORRECTION_CYCLES = 3
+FIELD_ATTEMPTS = 4                              # tries to get a usable answer for one field
+CONFIRM_KEYS = {"full_name", "phone", "dob"}    # always confirmed with an explicit yes/no
+RETRY_PREFIX = "క్షమించండి, అర్థం కాలేదు. "
+REASK_PREFIX = "సరే, మళ్ళీ చెప్పండి. "
 
 PROGRESS = {
     "/portal/dashboard": "లాగిన్ అయింది.",
@@ -43,14 +47,20 @@ class VoiceAgent:
         stop_requested: Callable[[], bool] = lambda: False,
         on_correction: Callable[[str, str], dict] | None = None,
         on_answer: Callable[[str, str], None] | None = None,
+        on_forget: Callable[[str], None] | None = None,
+        trace_id: str = "",
     ) -> None:
         self._say = say
         self._ask = ask
         self._stop = stop_requested
         self._on_correction = on_correction
         self._on_answer = on_answer
+        self._on_forget = on_forget
+        self._trace_id = trace_id
         self._last_path: str | None = None
         self._readbacks: set[str] = set()
+        self._answered: set[str] = set()   # fields whose value came from the user's voice
+        self._confirmed: set[str] = set()  # ... and that the user explicitly confirmed
 
     async def on_page(self, path: str) -> None:
         if path == self._last_path:
@@ -146,25 +156,52 @@ class VoiceAgent:
             profile = updated
         return None
 
-    async def ask_field(self, label: str, options: list[str], key: str | None = None) -> str:
-        """Ask the user for a field value (options read aloud for selects) and remember it."""
-        value = await self._ask_field_value(label, options)
-        if key and value and self._on_answer is not None:
-            self._on_answer(key, value)  # stored once: retries and later pages never re-ask
+    async def ask_field(self, element: dict, options: list[str]) -> str:
+        """Ask for one field, parse + validate the answer, confirm or echo it, and remember it."""
+        spec = answers.field_spec(element, options)
+        base = readback.options_prompt(spec.label, options) if options else readback.value_prompt(spec.label)
+        prompt = base
+        answer: str | None = None
+        for _ in range(FIELD_ATTEMPTS):
+            if answer is None:
+                answer = await self._ask_and_parse(prompt, spec.kind)
+            parsed = await answers.parse_answer(spec, answer, trace_id=self._trace_id)
+            answer = None
+            if parsed.value is None:
+                prompt = RETRY_PREFIX + base + answers.hint(spec)
+                continue
+            said = answers.spoken(spec, parsed.value)
+            if spec.key in CONFIRM_KEYS or not parsed.confident:
+                reply = await self._ask_and_parse(f"{said}. సరేనా?", "yes_no")
+                verdict = readback.parse_yes_no(reply)
+                if verdict is True:
+                    return self._accept(spec, parsed.value, confirmed=True)
+                if verdict is None:
+                    answer = reply  # they may have just said the (corrected) value again
+                prompt = REASK_PREFIX + base
+                continue
+            self._say(f"{said}, సరే.")  # echo, then move on
+            return self._accept(spec, parsed.value, confirmed=False)
+        raise HandoffError(f"no usable answer for {spec.label!r}")
+
+    def _accept(self, spec: answers.FieldSpec, value: str, *, confirmed: bool) -> str:
+        if spec.key:
+            self._answered.add(spec.key)
+            if confirmed:
+                self._confirmed.add(spec.key)
+            if self._on_answer is not None:
+                self._on_answer(spec.key, value)  # stored once: retries and later pages never re-ask
         return value
 
-    async def _ask_field_value(self, label: str, options: list[str]) -> str:
-        if options:
-            prompt = readback.options_prompt(label, options)
-            answer = await self._ask_and_parse(prompt, "option")
-            match = readback.match_option(answer, options)
-            if match is None:
-                answer = await self._ask_and_parse("క్షమించండి. " + prompt, "option")
-                match = readback.match_option(answer, options)
-            if match is None:
-                raise HandoffError(f"no option matched for {label!r}")
-            return match
-        return (await self._ask_and_parse(readback.value_prompt(label), "value")).strip()
+    def forget(self, key: str | None) -> bool:
+        """Drop a voice answer the page rejected so the field is asked again. False if not ours."""
+        if not key or key not in self._answered:
+            return False
+        self._answered.discard(key)
+        self._confirmed.discard(key)
+        if self._on_forget is not None:
+            self._on_forget(key)
+        return True
 
     async def before_action(self, element: dict, obs: dict, profile: dict) -> None:
         """Read back name + phone once, before leaving the first form."""
@@ -174,6 +211,8 @@ class VoiceAgent:
         if element.get("tag") != "button" or not ("save" in label or "continue" in label):
             return
         self._readbacks.add("form-1")
+        if {"full_name", "phone"} <= self._confirmed:
+            return  # both were already confirmed when the user gave them
         confirmed = await self._readback_cycle(profile)
         if confirmed is None:
             self._say(readback.READBACK_REJECTED)

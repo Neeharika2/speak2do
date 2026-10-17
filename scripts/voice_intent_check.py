@@ -154,7 +154,7 @@ async def main() -> int:
             calls.append("gemini")
             return json.dumps({"action": "cancel", "confidence": 0.9})
 
-        async def fake_evon(_transcript: str, _values: dict, _timeout: float) -> str:
+        async def fake_evon(_payloads: list, _timeout: float) -> str:
             calls.append("evon")
             return json.dumps({"action": "cancel", "confidence": 0.9})
 
