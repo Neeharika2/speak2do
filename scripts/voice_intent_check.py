@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app import events
+from app import config, events
 from app.voice import intent_llm
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -36,6 +36,8 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 async def main() -> int:
     # keep test events out of the real task log
     events.EVENTS_FILE = Path(tempfile.mkdtemp()) / "events.jsonl"
+    # a dummy endpoint so the (faked) model counts as configured; nothing goes over the network
+    config.EVON_BASE_URL, config.EVON_API_KEY = "http://evon.test/v1", "test-key"
     saved_request = intent_llm._request  # the real provider dispatcher
 
     async def parse(payload: object) -> intent_llm.Intent | None:
@@ -114,8 +116,7 @@ async def main() -> int:
 
     check("editable fields exclude secrets", "password" not in intent_llm.EDITABLE_FIELDS and "otp" not in intent_llm.EDITABLE_FIELDS)
 
-    # ---- provider seam: Evon (OpenAI-compatible) vs Gemini
-    from app import config
+    # ---- model seam: Gnani Evon (OpenAI-compatible)
 
     payloads = intent_llm._openai_payloads("నా పేరు నిహారిక", {"full_name": "Ravi Kumar"})
     primary, retry = payloads[0], payloads[1]
@@ -141,40 +142,36 @@ async def main() -> int:
         str([m["role"] for m in retry["messages"]]),
     )
 
-    saved_provider = config.VOICE_LLM_PROVIDER
+    calls: list[list] = []
+
+    async def fake_evon(payloads: list, _timeout: float) -> str:
+        calls.append(payloads)
+        return '<think>{"maybe": 1}</think>{"action": "cancel", "confidence": 0.9}'
+
+    real_evon = intent_llm._request_openai_compat
+    intent_llm._request_openai_compat = fake_evon
+    intent_llm._request = saved_request  # undo the parse() helper's monkeypatch
+    saved = (config.EVON_BASE_URL, config.EVON_API_KEY)
     try:
-        config.VOICE_LLM_PROVIDER = "openai-compatible"
-        check("provider alias 'openai-compatible' -> evon", intent_llm._provider() == "evon")
-        config.VOICE_LLM_PROVIDER = "gemini"
-        check("provider 'gemini' -> gemini", intent_llm._provider() == "gemini")
-
-        calls: list[str] = []
-
-        async def fake_gemini(_prompt: str, _schema: dict, _timeout: float) -> str:
-            calls.append("gemini")
-            return json.dumps({"action": "cancel", "confidence": 0.9})
-
-        async def fake_evon(_payloads: list, _timeout: float) -> str:
-            calls.append("evon")
-            return json.dumps({"action": "cancel", "confidence": 0.9})
-
-        real_gemini, real_evon = intent_llm._request_gemini, intent_llm._request_openai_compat
-        intent_llm._request_gemini, intent_llm._request_openai_compat = fake_gemini, fake_evon
-        intent_llm._request = saved_request  # undo the parse() helper's monkeypatch
-        saved_key = config.EVON_API_KEY
-        try:
-            config.VOICE_LLM_PROVIDER = "evon"
-            config.EVON_API_KEY = "test-key"
-            intent = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
-            config.VOICE_LLM_PROVIDER = "gemini"
-            intent2 = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
-        finally:
-            intent_llm._request_gemini, intent_llm._request_openai_compat = real_gemini, real_evon
-            config.EVON_API_KEY = saved_key
-        check("dispatch routes to the configured transport", calls == ["evon", "gemini"], str(calls))
-        check("both transports yield intents", intent is not None and intent2 is not None)
+        config.EVON_BASE_URL, config.EVON_API_KEY = "", ""
+        off = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
+        off_json = await intent_llm.complete_json("x", 0.1)
+        check("not configured -> LLM layer off", off is None and off_json is None and not calls, str(len(calls)))
+        config.EVON_BASE_URL, config.EVON_API_KEY = "http://evon.test/v1", "test-key"
+        intent = await intent_llm.parse_intent("పరీక్ష", trace_id="tr_check", current_values={}, timeout_s=0.1)
+        check("configured -> Evon called, <think> text ignored", intent is not None and intent.action == "cancel", repr(intent))
+        data = await intent_llm.complete_json("prompt", 0.1)
+        last = calls[-1]
+        check(
+            "complete_json: thinking off first, plain retry second",
+            data == {"action": "cancel", "confidence": 0.9}
+            and last[0].get("chat_template_kwargs") == {"enable_thinking": False}
+            and "chat_template_kwargs" not in last[1],
+            json.dumps(data),
+        )
     finally:
-        config.VOICE_LLM_PROVIDER = saved_provider
+        intent_llm._request_openai_compat = real_evon
+        config.EVON_BASE_URL, config.EVON_API_KEY = saved
 
     fenced = ('```json\n{"action": "edit", "edits": [{"field": "full_name", "value": "నిహారిక"}], '
               '"confidence": 0.8}\n```')

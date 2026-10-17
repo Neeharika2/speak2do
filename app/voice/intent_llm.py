@@ -7,9 +7,10 @@ code validates it — fields must be known editable keys, values go through the
 same sanitizers the rule layer uses, and callers gate on confidence.
 LLM proposes, deterministic code disposes.
 
-Providers (VOICE_LLM_PROVIDER): "gemini" (default) or "evon" — Gnani Evon v3.3
-served over an OpenAI-compatible /v1/chat/completions endpoint (vLLM, SGLang,
-FriendliAI or the Gnani API beta), thinking mode disabled.
+Model: Gnani Evon v3.3 over an OpenAI-compatible /v1/chat/completions endpoint
+(Gnani API beta, a FriendliAI dedicated endpoint, or self-hosted vLLM/SGLang),
+thinking mode disabled. Configure EVON_BASE_URL, EVON_API_KEY, EVON_MODEL; when
+they are not set the LLM layer is simply off and the rules work alone.
 
 Test knobs:
     VOICE_INTENT_FAKE_JSON   — canned response text, skips the API (offline tests)
@@ -63,39 +64,17 @@ class Intent:
     confidence: float = 0.0
 
 
-def _schema() -> dict:
-    return {
-        "type": "OBJECT",
-        "properties": {
-            "action": {"type": "STRING", "enum": list(ACTIONS)},
-            "edits": {
-                "type": "ARRAY",
-                "items": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "field": {"type": "STRING", "enum": EDITABLE_FIELDS},
-                        "value": {"type": "STRING"},
-                    },
-                    "required": ["field"],
-                },
-            },
-            "confidence": {"type": "NUMBER"},
-        },
-        "required": ["action", "confidence"],
-    }
-
-
 def _instructions() -> str:
     return (
         "You are the intent parser for a voice assistant that fills a scholarship application. "
-        "The user speaks Telugu, English, or a mix. Classify the utterance as one action:\n"
+        "The user speaks any Indian language, English, or a mix. Classify the utterance as one action:\n"
         '- "edit": the user wants to change one or more form values. Put each change in edits with '
         'the field name and the NEW value if spoken (if no new value is given, omit "value").\n'
         '- "start_task": the user asks to start or continue the application.\n'
         '- "cancel": the user asks to stop the current work.\n'
         '- "unclear": anything else (questions, small talk, noise).\n'
-        "Rules: values must be short form values, never sentences. Keep the value in the script the "
-        "user spoke (Telugu stays in Telugu script). If old and new values are both "
+        "Rules: values must be short form values, never sentences. Write names, places and other "
+        "text in English (Latin) letters, transliterating from any script. If old and new values are both "
         "spoken, return only the new value. Never invent fields outside the list.\n"
         'Reply with a single JSON object only: {"action": "edit|start_task|cancel|unclear", '
         '"edits": [{"field": "...", "value": "..."}], "confidence": 0.0}'
@@ -111,18 +90,8 @@ def _prompt(transcript: str, current_values: dict) -> str:
     return f"{_instructions()}\n\n{_context(transcript, current_values)}"
 
 
-def _provider() -> str:
-    """Resolve the configured provider ("gemini" when unknown)."""
-    provider = (config.VOICE_LLM_PROVIDER or "gemini").strip().lower()
-    return "evon" if provider in ("evon", "openai", "openai-compatible", "vllm") else "gemini"
-
-
-def _api_key() -> str:
-    return config.EVON_API_KEY if _provider() == "evon" else config.GEMINI_API_KEY
-
-
-def _model() -> str:
-    return config.EVON_MODEL if _provider() == "evon" else config.GEMINI_MODEL
+def _configured() -> bool:
+    return bool(config.EVON_BASE_URL and config.EVON_API_KEY)
 
 
 def _openai_payloads(transcript: str, current_values: dict) -> list[dict]:
@@ -153,34 +122,20 @@ def _openai_payloads(transcript: str, current_values: dict) -> list[dict]:
     return [full, merged]
 
 
-async def _request_gemini(prompt: str, schema: dict, timeout_s: float) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
-    body: dict = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.0,
-            "responseMimeType": "application/json",
-            "responseSchema": schema,
-        },
-    }
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
-        response = await client.post(url, headers={"x-goog-api-key": config.GEMINI_API_KEY}, json=body)
-        if response.status_code == 400:
-            # some API versions reject responseSchema; retry with plain JSON mode
-            body["generationConfig"].pop("responseSchema", None)
-            response = await client.post(url, headers={"x-goog-api-key": config.GEMINI_API_KEY}, json=body)
-    response.raise_for_status()
-    data = response.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+_PREFERRED_PAYLOAD_REJECTED = False  # host said 400 to the first variant once: go straight to the retry
 
 
 async def _request_openai_compat(payloads: list[dict], timeout_s: float) -> str:
     """Evon v3.3 (or any OpenAI-compatible server) over /v1/chat/completions."""
+    global _PREFERRED_PAYLOAD_REJECTED
     url = f"{config.EVON_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {config.EVON_API_KEY}"}
+    if _PREFERRED_PAYLOAD_REJECTED and len(payloads) > 1:
+        payloads = payloads[1:]
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         response = await client.post(url, headers=headers, json=payloads[0])
         if response.status_code == 400 and len(payloads) > 1:
+            _PREFERRED_PAYLOAD_REJECTED = True
             response = await client.post(url, headers=headers, json=payloads[1])
     response.raise_for_status()
     data = response.json()
@@ -188,39 +143,33 @@ async def _request_openai_compat(payloads: list[dict], timeout_s: float) -> str:
 
 
 async def _request(transcript: str, current_values: dict, timeout_s: float) -> str:
-    """Provider seam; tests monkeypatch this. Returns the raw JSON text."""
-    if _provider() == "evon":
-        return await _request_openai_compat(_openai_payloads(transcript, current_values), timeout_s)
-    return await _request_gemini(_prompt(transcript, current_values), _schema(), timeout_s)
+    """Intent call (tests monkeypatch this). Returns the raw model text."""
+    return await _request_openai_compat(_openai_payloads(transcript, current_values), timeout_s)
 
 
-async def complete_json(prompt: str, schema: dict, timeout_s: float = INTENT_TIMEOUT_S) -> dict | None:
-    """One-shot JSON completion on the configured provider; None when unavailable or invalid.
+async def complete_json(prompt: str, timeout_s: float = INTENT_TIMEOUT_S) -> dict | None:
+    """One-shot JSON completion on Evon; None when not configured, disabled or invalid.
 
-    Shared by other voice parsers (e.g. app/agent/answers.py) so there is one provider seam.
+    Shared by other voice parsers (e.g. app/agent/answers.py) so there is one model seam.
     """
-    if os.environ.get(DISABLED_ENV) or not _api_key():
+    if os.environ.get(DISABLED_ENV) or not _configured():
         return None
-    if _provider() == "evon":
-        base = {
-            "model": config.EVON_MODEL,
-            "temperature": 0.0,
-            "max_tokens": INTENT_MAX_TOKENS,
-            "stream": False,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        payloads = [{**base, "chat_template_kwargs": {"enable_thinking": False}}, base]
-        raw = await _request_openai_compat(payloads, timeout_s)
-    else:
-        raw = await _request_gemini(prompt, schema, timeout_s)
-    return _loads_jsonish(raw)
+    base = {
+        "model": config.EVON_MODEL,
+        "temperature": 0.0,
+        "max_tokens": INTENT_MAX_TOKENS,
+        "stream": False,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    payloads = [{**base, "chat_template_kwargs": {"enable_thinking": False}}, base]
+    return _loads_jsonish(await _request_openai_compat(payloads, timeout_s))
 
 
 def _loads_jsonish(raw: object) -> dict | None:
     """Parse JSON, tolerating markdown fences or surrounding prose."""
     if not isinstance(raw, str):
         return None
-    text = raw.strip()
+    text = re.sub(r"<think>.*?</think>", "", raw, flags=re.S).strip()  # reasoning models may think aloud
     candidates = [text]
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
     if fenced:
@@ -280,7 +229,7 @@ async def parse_intent(
     current_values: dict | None = None,
     timeout_s: float = INTENT_TIMEOUT_S,
 ) -> Intent | None:
-    """Ask Gemini to place an utterance the rules could not; None means "no verdict"."""
+    """Ask the LLM to place an utterance the rules could not; None means "no verdict"."""
     if os.environ.get(DISABLED_ENV):
         return None
     if not transcript.strip():
@@ -288,12 +237,11 @@ async def parse_intent(
 
     fake = os.environ.get(FAKE_ENV)
     started = time.perf_counter()
-    provider = _provider()
-    source = "fake" if fake else provider
+    source = "fake" if fake else "evon"
     if fake:
         raw = fake
     else:
-        if not _api_key():
+        if not _configured():
             return None
         try:
             raw = await _request(transcript, current_values or {}, timeout_s)
@@ -321,6 +269,6 @@ async def parse_intent(
         confidence=intent.confidence,
         latency_ms=latency_ms,
         source=source,
-        model=_model(),
+        model=config.EVON_MODEL,
     )
     return intent

@@ -1,6 +1,6 @@
 """Jev-driven agent loop (M2): observe -> decide -> validate -> execute -> verify.
 
-Budgets: max actions, wall time, retries per action, token cost cap, LLM fallback calls.
+Budgets: max actions, wall time, retries per action, token cost cap.
 Guards: no-progress detector (repeated page states / repeated actions), consecutive errors.
 Secrets never enter the model state (values.py redacts; the executor supplies them).
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from app import events, policy
-from app.agent import jev_client, llm, values
+from app.agent import jev_client, values
 from app.agent.observe import observe_page
 from app.agent.voice_ux import HandoffError, StopRequested
 from app.browser.controller import BrowserController
@@ -200,7 +200,6 @@ async def run_agent_goal(
     max_seconds: float = 300.0,
     max_retries: int = 2,
     max_tokens: int = 60_000,
-    max_llm_calls: int = 15,
     stall_limit: int = STALL_LIMIT,
     error_limit: int = ERROR_STREAK_LIMIT,
     live_dir: Path | None = None,
@@ -232,7 +231,6 @@ async def run_agent_goal(
     step_durations: list[float] = []
     recent: list[str] = []
     tokens = 0
-    llm_calls = 0
     stall = 0
     consecutive_errors = 0
     stop_reason = "action_budget"
@@ -347,12 +345,6 @@ async def run_agent_goal(
                     except HandoffError as exc:
                         stop_reason, error = "handoff", str(exc)
                         break
-                elif llm_calls < max_llm_calls:
-                    llm_calls += 1
-                    try:
-                        value = await llm.suggest_value(element["label"], obs["path"], current_profile())
-                    except Exception:  # noqa: BLE001
-                        value = ""
 
             policy_decision = policy.decide(
                 {
@@ -450,7 +442,6 @@ async def run_agent_goal(
         "wall_s": round(time.monotonic() - started, 2),
         "step_durations_s": step_durations,
         "tokens": tokens,
-        "llm_calls": llm_calls,
         "error": error,
         "final_url": final_url,
     }

@@ -249,16 +249,9 @@ def _llm_prompt(spec: FieldSpec, utterance: str) -> str:
     return "\n".join(lines)
 
 
-_LLM_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {"value": {"type": "STRING", "nullable": True}, "confident": {"type": "BOOLEAN"}},
-    "required": ["value", "confident"],
-}
-
-
 async def _llm_extract(spec: FieldSpec, utterance: str) -> dict | None:
     """Provider call (tests replace this)."""
-    return await intent_llm.complete_json(_llm_prompt(spec, utterance), _LLM_SCHEMA, LLM_TIMEOUT_S)
+    return await intent_llm.complete_json(_llm_prompt(spec, utterance), LLM_TIMEOUT_S)
 
 
 async def _llm(spec: FieldSpec, utterance: str, trace_id: str) -> Parsed:

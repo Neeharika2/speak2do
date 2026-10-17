@@ -46,7 +46,7 @@ phases/               phase-by-phase build log (phase1.md = M0, phase2.md = M1, 
 uv venv .venv                                  # or: python3 -m venv .venv
 uv pip install -r requirements.txt --python .venv/bin/python
 .venv/bin/playwright install chromium
-cp .env.example .env                           # then fill in the three API keys
+cp .env.example .env                           # then fill in the API keys (+ Evon endpoint)
 ```
 
 ## Run the app
@@ -115,9 +115,11 @@ with the synthetic sample:
 ## Notes
 
 - `.env` holds real keys and is gitignored. `.env.example` documents the variables.
-- Voice intent LLM is switchable: `VOICE_LLM_PROVIDER=gemini` (default) or `evon` —
-  Gnani Evon v3.3 over an OpenAI-compatible endpoint (`EVON_BASE_URL`, `EVON_API_KEY`,
-  `EVON_MODEL`; thinking mode disabled, 300-token cap). Rules stay first either way.
+- Language model: **Gnani Evon v3.3** on any OpenAI-compatible endpoint — set
+  `EVON_BASE_URL`, `EVON_API_KEY`, `EVON_MODEL` (Gnani API beta, a FriendliAI dedicated
+  endpoint, or self-hosted vLLM/SGLang). It turns spoken answers in any language into
+  form values (English letters, dates, digits, options) and places unclear commands.
+  Thinking mode is off, 300-token cap. Unset = rules only.
 - All portal data is synthetic; passwords/OTPs are redacted in event logs.
 - Jev is a decision model (not a browser driver): the loop observes/executes,
   Jev picks actions. See `docs/m0_vendor_status.md`.

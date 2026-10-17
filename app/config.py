@@ -29,14 +29,12 @@ _load_dotenv()
 # Vendor keys
 GNANI_API_KEY = os.environ.get("GNANI_API_KEY", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Voice intent LLM provider seam (M5): Gemini, or Gnani Evon (OpenAI-compatible).
-# Flip with VOICE_LLM_PROVIDER once Evon beta access (or a hosted endpoint) is granted.
-VOICE_LLM_PROVIDER = os.environ.get("VOICE_LLM_PROVIDER", "gemini").strip().lower()
-EVON_BASE_URL = os.environ.get("EVON_BASE_URL", "https://api.inya.ai/v1")
+# Language model: Gnani Evon v3.3 on any OpenAI-compatible /v1 endpoint (Gnani API beta,
+# FriendliAI dedicated endpoint, or self-hosted vLLM/SGLang). Unset = LLM layer off, rules only.
+EVON_BASE_URL = os.environ.get("EVON_BASE_URL", "")   # e.g. https://api.friendli.ai/dedicated/v1
 EVON_API_KEY = os.environ.get("EVON_API_KEY", "")
-EVON_MODEL = os.environ.get("EVON_MODEL", "gnani-evon-v3.3")
+EVON_MODEL = os.environ.get("EVON_MODEL", "gnani/gnani-evon-v3.3")  # or the endpoint id the host gives
 
 # Vendor endpoints (verified 2026-10-09; see docs/m0_vendor_status.md)
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"          # Jev is a TypeSafe key
@@ -46,7 +44,6 @@ GNANI_TTS_URL = "https://api.vachana.ai/api/v1/tts/inference"
 # Agent defaults
 DEFAULT_LANGUAGE = os.environ.get("AGENT_LANGUAGE", "te-IN")
 DEFAULT_VOICE = os.environ.get("AGENT_VOICE", "Varuni")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 # Optional pre-filled values. Empty (default) = the agent asks the user for every field.
 AGENT_PROFILE = os.environ.get("AGENT_PROFILE", "")
 
