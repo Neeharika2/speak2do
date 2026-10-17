@@ -27,18 +27,20 @@ if str(REPO_ROOT) not in sys.path:
 import httpx
 import websockets
 
-from app import config
+from app import config, lang
 from app.voice import tts
 from app.voice.streaming import FRAME_SAMPLES, STREAM_SAMPLE_RATE, read_wav_pcm
 
 RESULTS: list[tuple[str, bool, str]] = []
 
-TEXT_ANSWERS = [
-    ("Date of birth", "2005-03-12"), ("Gender", "Female"), ("Mobile", "9876543210"),
-    ("Email", "sita@example.com"), ("సరేనా", "అవును"), ("College", "Govt College Hyderabad"),
-    ("Course", "UG"), ("Year", "2nd"), ("Marks", "81"), ("Address", "1-2 MG Road"),
-    ("City", "Hyderabad"), ("State", "Telangana"), ("District", "Hyderabad"), ("PIN", "500001"),
-]
+# Typed answers keyed by the spoken field name the agent uses (Telugu, the default language).
+_TE = lang.get("te-IN")
+TEXT_ANSWERS = [(_TE.label(key), value) for key, value in [
+    ("dob", "2005-03-12"), ("gender", "Female"), ("phone", "9876543210"),
+    ("email", "sita@example.com"), ("college", "Govt College Hyderabad"),
+    ("course", "UG"), ("year", "2nd"), ("marks", "81"), ("address", "1-2 MG Road"),
+    ("city", "Hyderabad"), ("state", "Telangana"), ("district", "Hyderabad"), ("pin", "500001"),
+]]
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:

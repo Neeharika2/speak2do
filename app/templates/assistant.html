@@ -278,6 +278,7 @@
         const form = new FormData();
         form.append("text", text);
         form.append("language", languageSelect.value);
+        if (currentSession) form.append("session_id", currentSession);
         try {
           const response = await fetch(endpoint, { method: "POST", body: form });
           if (!response.ok) {
@@ -286,7 +287,11 @@
             return;
           }
           const data = await response.json();
-          if (endpoint === "/api/voice/command") startPolling(data.session_id);
+          if (endpoint === "/api/voice/command") {
+            startPolling(data.session_id);
+            // bind the new run to this tab's socket so its speech streams here
+            if (wsOpen()) voiceWs.send(JSON.stringify({ type: "begin", session_id: data.session_id }));
+          }
           textInput.value = "";
         } catch (err) {
           setStatus("Request failed: " + err.message, "error");
@@ -379,7 +384,7 @@
             wsLeftover = new Int16Array(0);
             voiceWs.send(JSON.stringify({ type: "start" }));
             if (sessionState && ACTIVE.includes(sessionState.status)) {
-              voiceWs.send(JSON.stringify({ type: "begin", language: languageSelect.value }));
+              voiceWs.send(JSON.stringify({ type: "begin", session_id: currentSession }));
             }
           }
         };

@@ -15,13 +15,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -31,13 +32,14 @@ from app.agent import readback, values
 from app.agent.loop import run_agent_goal
 from app.agent.voice_ux import VoiceAgent
 from app.portal import db as portal_db
-from app.voice import intent_llm, stt, streaming, tts
+from app.voice import intent_llm, streaming, tts
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(config.REPO_ROOT / "app" / "templates"))
 
 SESSIONS_DIR = config.DATA_DIR / "sessions"
 ACTIVE_STATES = {"queued", "transcribing", "running", "speaking", "awaiting"}
+KEEP_SESSION_DIRS = 30       # older session folders (audio, screenshots) are deleted
 TRANSCRIPT_DEBOUNCE_S = 1.0  # aggregate VAD segments of one utterance (hands-free: allow short pauses)
 ANSWER_TIMEOUT_S = 30.0      # a spoken question must be answered within this window
 
@@ -69,10 +71,9 @@ class Session:
     # interactive state
     awaiting: bool = False
     prompt_text: str = ""
-    prompt_log: list[dict] = field(default_factory=list)
     speech_id: int = 0
     stream_id: int = 0
-    speech_tasks: list[asyncio.Task] = field(default_factory=list)
+    speech_tasks: set[asyncio.Task] = field(default_factory=set)  # strong refs until each finishes
     speech_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stop_flag: bool = False
     stop_reason: str | None = None
@@ -89,20 +90,22 @@ class Session:
 
 
 SESSIONS: dict[str, Session] = {}
-_latest_ws_send: Callable[[dict], Awaitable[None]] | None = None
-
-
-def _attach_ws(session: Session) -> None:
-    """Let a REST-started session stream speech to the browser's live socket."""
-    if session.ws_send is None and _latest_ws_send is not None:
-        session.ws_send = _latest_ws_send
 
 
 def _active_session() -> Session | None:
+    """The running session (the portal has one test user, so one run at a time)."""
     for session in reversed(list(SESSIONS.values())):
         if session.status in ACTIVE_STATES:
             return session
     return None
+
+
+def _find_session(session_id: str | None) -> Session | None:
+    """The caller's own active session; without an id, the running one (tests, old clients)."""
+    if not session_id:
+        return _active_session()
+    session = SESSIONS.get(session_id)
+    return session if session is not None and session.status in ACTIVE_STATES else None
 
 
 def _log_unmatched(session: Session, transcript: str, context: str) -> None:
@@ -122,7 +125,19 @@ def _label(session: Session, field: str) -> str:
     return langs.get(session.language).label(field)
 
 
+def _prune_session_dirs() -> None:
+    """Keep disk use bounded: drop the oldest finished session folders."""
+    if not SESSIONS_DIR.exists():
+        return
+    live = {session.dir for session in SESSIONS.values() if session.status in ACTIVE_STATES}
+    dirs = sorted((d for d in SESSIONS_DIR.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
+    for old in dirs[: max(0, len(dirs) - KEEP_SESSION_DIRS)]:
+        if old not in live:
+            shutil.rmtree(old, ignore_errors=True)
+
+
 def _new_session(language: str | None = None) -> Session:
+    _prune_session_dirs()
     sid = f"s_{uuid.uuid4().hex[:10]}"
     session_dir = SESSIONS_DIR / sid
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -226,12 +241,12 @@ async def _speak_worker(session: Session, text: str) -> None:
 
 def _publish_speech(session: Session, text: str) -> None:
     task = asyncio.create_task(_speak_worker(session, text))
-    session.speech_tasks.append(task)
+    session.speech_tasks.add(task)
+    task.add_done_callback(session.speech_tasks.discard)
 
 
 async def _ask(session: Session, prompt: str, kind: str) -> str:
     session.prompt_text = prompt
-    session.prompt_log.append({"kind": kind, "prompt": prompt})
     session.awaiting = True
     session.status = "awaiting"
     events.log_event(session.trace_id, "voice.ask", kind=kind, prompt=prompt)
@@ -418,17 +433,10 @@ async def _conversation(session: Session) -> None:
     await _run_agent(session)
 
 
-async def _command(session: Session, audio_path: Path | None, text: str | None) -> None:
-    """Text/WAV command (fallback path): parse the request, then run the agent."""
-    trace_id = session.trace_id
-    if text is not None:
-        transcript = text.strip()
-        events.log_event(trace_id, "text.command", transcript=transcript)
-    else:
-        session.status = "transcribing"
-        stt_result = await stt.transcribe(audio_path, language=session.language)
-        transcript = stt_result["transcript"].strip()
-        events.log_event(trace_id, "stt.command", duration_ms=stt_result["latency_ms"], transcript=transcript)
+async def _command(session: Session, text: str) -> None:
+    """Typed command (text fallback): parse the request, then run the agent."""
+    transcript = text.strip()
+    events.log_event(session.trace_id, "text.command", transcript=transcript)
     session.transcript = transcript
 
     if not transcript:
@@ -458,17 +466,6 @@ async def _command(session: Session, audio_path: Path | None, text: str | None) 
             await _speak_reply(session, _say(session, "reply_clarify"))
             return
     await _run_agent(session)
-
-
-async def _transcribe_input(session: Session, audio: UploadFile | None, text: str | None) -> str:
-    if text is not None and text.strip():
-        return text.strip()
-    if audio is None:
-        return ""
-    path = session.dir / f"input_{uuid.uuid4().hex[:6]}.wav"
-    path.write_bytes(await audio.read())
-    result = await stt.transcribe(path, language=session.language)
-    return result["transcript"].strip()
 
 
 # --------------------------------------------------------------------------- transcript routing (shared)
@@ -535,18 +532,12 @@ async def assistant_page(request: Request):
 
 @router.post("/api/voice/command")
 async def voice_command(
-    audio: UploadFile | None = File(None), text: str | None = Form(None), language: str | None = Form(None)
+    text: str = Form(...), language: str | None = Form(None)
 ):
     if _active_session():
         raise HTTPException(status_code=409, detail="The agent is already busy with another task.")
     session = _new_session(language)
-    _attach_ws(session)
-    audio_path: Path | None = None
-    if text is None and audio is not None:
-        audio_path = session.dir / "command.wav"
-        audio_path.write_bytes(await audio.read())
-        events.log_event(session.trace_id, "audio.received", bytes=audio_path.stat().st_size)
-    session.task = asyncio.create_task(_run_session(session, _command(session, audio_path, text)))
+    session.task = asyncio.create_task(_run_session(session, _command(session, text)))
     return {"session_id": session.id}
 
 
@@ -556,28 +547,29 @@ async def voice_start(language: str | None = Form(None)):
     if _active_session():
         raise HTTPException(status_code=409, detail="The agent is already busy with another task.")
     session = _new_session(language)
-    _attach_ws(session)
     session.task = asyncio.create_task(_run_session(session, _conversation(session)))
     return {"session_id": session.id}
 
 
 @router.post("/api/voice/answer")
-async def voice_answer(audio: UploadFile | None = File(None), text: str | None = Form(None)):
-    session = _active_session()
+async def voice_answer(
+    text: str = Form(...), session_id: str | None = Form(None)
+):
+    session = _find_session(session_id)
     if session is None or not session.awaiting:
         raise HTTPException(status_code=409, detail="The agent is not waiting for an answer.")
-    _attach_ws(session)
-    answer = await _transcribe_input(session, audio, text)
+    answer = text.strip()
     return _handle_answer(session, answer)
 
 
 @router.post("/api/voice/interrupt")
-async def voice_interrupt(audio: UploadFile | None = File(None), text: str | None = Form(None)):
-    session = _active_session()
+async def voice_interrupt(
+    text: str = Form(...), session_id: str | None = Form(None)
+):
+    session = _find_session(session_id)
     if session is None:
         raise HTTPException(status_code=409, detail="No active session.")
-    _attach_ws(session)
-    transcript = await _transcribe_input(session, audio, text)
+    transcript = text.strip()
     if session.awaiting:
         return _handle_answer(session, transcript)
     return await _handle_interrupt(session, transcript)
@@ -659,8 +651,13 @@ async def voice_websocket(websocket: WebSocket):
     pending_texts: list[str] = []
     debounce_task: asyncio.Task | None = None
 
+    bound: Session | None = None  # this socket's own conversation (other tabs never receive its speech)
+
+    def _mine() -> Session | None:
+        return bound if bound is not None and bound.status in ACTIVE_STATES else None
+
     async def _route_transcript(text: str) -> None:
-        session = _active_session()
+        session = _mine()
         if session is None:
             # hands-free mic: speech outside a conversation is not a command
             events.log_event("ws", "voice.ignored", transcript=text)
@@ -706,8 +703,6 @@ async def voice_websocket(websocket: WebSocket):
         await websocket.close()
         return
 
-    global _latest_ws_send
-    _latest_ws_send = send_json
     buffer = bytearray()
     recording = False
     try:
@@ -741,20 +736,25 @@ async def voice_websocket(websocket: WebSocket):
                 continue
             kind = command.get("type")
             if kind == "begin":
-                # Start button: agent-led conversation in the chosen language, bound to this socket
-                session = _active_session()
+                # Start button: agent-led conversation in the chosen language, bound to this socket.
+                # With a session_id (reconnect, or a text-started run) it re-binds that session.
+                session = _find_session(command.get("session_id")) if command.get("session_id") else None
                 if session is None:
+                    if _active_session() is not None:
+                        await send_json({"type": "error", "message": "Another conversation is already running."})
+                        continue
                     session = _new_session(command.get("language"))
                     try:  # recognise speech in the session's language from now on
                         await stt_stream.set_language(session.language)
                     except Exception as exc:  # noqa: BLE001 — the run still works; the user can type
                         events.log_event(session.trace_id, "stt.language_error", error=str(exc))
                     session.task = asyncio.create_task(_run_session(session, _conversation(session)))
+                bound = session
                 session.ws_send = send_json
                 await send_json({"type": "session", "session_id": session.id})
             elif kind == "end":
                 # Stop button: halt the run the same way the spoken stop word does
-                session = _active_session()
+                session = _mine()
                 if session is not None:
                     session.stop_flag = True
                     if session.answer_event is not None:
@@ -790,6 +790,4 @@ async def voice_websocket(websocket: WebSocket):
         for session in SESSIONS.values():
             if session.ws_send is send_json:
                 session.ws_send = None
-        if _latest_ws_send is send_json:
-            _latest_ws_send = None
         await stt_stream.close()

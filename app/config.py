@@ -43,6 +43,9 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")  # fastes
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"          # Jev is a TypeSafe key
 GNANI_STT_URL = "https://api.vachana.ai/stt/v3"
 GNANI_TTS_URL = "https://api.vachana.ai/api/v1/tts/inference"
+GNANI_STT_WS_URL = "wss://api.vachana.ai/stt/v3/stream"
+GNANI_TTS_WS_URL = "wss://api.vachana.ai/api/v1/tts"
+GNANI_TTS_MODEL = "timbre-v2.5"
 
 # Agent defaults
 DEFAULT_LANGUAGE = os.environ.get("AGENT_LANGUAGE", "te-IN")

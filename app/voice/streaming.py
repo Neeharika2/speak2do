@@ -23,8 +23,8 @@ from websockets.protocol import State
 
 from app import config, events
 
-STT_WS_URL = "wss://api.vachana.ai/stt/v3/stream"
-TTS_WS_URL = "wss://api.vachana.ai/api/v1/tts"
+STT_WS_URL = config.GNANI_STT_WS_URL
+TTS_WS_URL = config.GNANI_TTS_WS_URL
 
 STREAM_SAMPLE_RATE = 48000
 FRAME_SAMPLES = 512
@@ -201,7 +201,7 @@ async def synthesize_stream(
     request = {
         "text": text,
         "voice": voice or config.DEFAULT_VOICE,
-        "model": "timbre-v2.5",
+        "model": config.GNANI_TTS_MODEL,
         "language": language or config.DEFAULT_LANGUAGE,
         "speed": speed,
         "audio_config": {

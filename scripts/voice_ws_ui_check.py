@@ -28,7 +28,7 @@ from playwright.async_api import async_playwright
 
 import httpx
 
-from app import config
+from app import config, lang
 from app.voice import tts
 from app.voice.streaming import pcm_to_wav, read_wav_pcm
 
@@ -141,7 +141,7 @@ async def main() -> int:
         except Exception:  # noqa: BLE001 — surfaced as a failed check below
             pass
         updated_text = (await page.inner_text("#updated")).strip()
-        check("typed answer cleaned, confirmed and shown", "Name: Sita Devi" in updated_text, updated_text[:60])
+        check("typed answer cleaned, confirmed and shown", f"{lang.get('te-IN').label('full_name')}: Sita Devi" in updated_text, updated_text[:60])
 
         await page.fill("#text-fallback", "ఆగు")  # stop the run cleanly
         await page.click("#text-send")

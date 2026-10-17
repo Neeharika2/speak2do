@@ -25,7 +25,7 @@ async def speak(
     payload = {
         "text": text,
         "voice": voice,
-        "model": "timbre-v2.5",
+        "model": config.GNANI_TTS_MODEL,
         "language": language,
         "speed": 1.0,
         "audio_config": {

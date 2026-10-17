@@ -34,7 +34,7 @@ CHANGE_WORDS = [
 # "Is this a request to (continue) the application task?"
 INTENT_WORDS = [
     "application", "scholarship", "apply", "form", "fill", "submit", "start", "login",
-    "అప్లికేషన్", "స్కాలర్షిప్", "దరఖాస్తు", "ఫారం", "చేయండి", "చేయి", "నింప",
+    "అప్లికేషన్", "స్కాలర్షిప్", "దరఖాస్తు", "ఫారం", "నింప",
 ]
 
 # Telugu-script variants for English option values on the portal.
@@ -237,10 +237,12 @@ def extract_field_value(field: str, text: str, language: str | None = None) -> s
     normalized = normalize_text(text)
     if field == "phone":
         digits = parse_digits(normalized, language)
-        return digits if len(digits) >= 6 else None
+        if len(digits) == 12 and digits.startswith("91"):
+            digits = digits[2:]  # "+91 98…"
+        return digits if len(digits) == 10 else None
     if field == "pin":
         digits = parse_digits(normalized, language)
-        return digits if len(digits) >= 4 else None
+        return digits if len(digits) == 6 else None
     if field == "district":
         return match_option(normalized, DISTRICT_OPTIONS)
     if field in ("full_name", "address", "college", "email"):
@@ -284,4 +286,4 @@ def parse_correction(text: str) -> tuple[str, str | None] | None:
 
 def is_application_intent(text: str) -> bool:
     normalized = normalize_text(text)
-    return any(word in normalized for word in INTENT_WORDS)
+    return any(has_word(normalized, word) for word in INTENT_WORDS)  # "information" is not "form"

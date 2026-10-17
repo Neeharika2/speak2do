@@ -101,6 +101,16 @@ def main() -> int:
     check("english option matched", readback.match_option("Krishna", ["Guntur", "Krishna"]) == "Krishna")
     check("unknown option -> None (re-ask)", readback.match_option("something else", ["Guntur", "Krishna"]) is None)
 
+    # step 5: whole-word task intent, exact phone / PIN length on corrections
+    check("'information' is not the task intent", not readback.is_application_intent("give me information"))
+    check("'ఫోన్ చేయి' is not the task intent", not readback.is_application_intent("ఫోన్ చేయి"))
+    check("'fill the form' is the task intent", readback.is_application_intent("please fill the form"))
+    check("correction phone needs 10 digits", readback.extract_field_value("phone", "98765") is None
+          and readback.extract_field_value("phone", "9876543210") == "9876543210")
+    check("correction phone drops +91", readback.extract_field_value("phone", "+91 98765 43210") == "9876543210")
+    check("correction PIN needs 6 digits", readback.extract_field_value("pin", "5220") is None
+          and readback.extract_field_value("pin", "522001") == "522001")
+
     failed = [name for name, ok, _ in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} voice UX checks passed")
     return 1 if failed else 0
