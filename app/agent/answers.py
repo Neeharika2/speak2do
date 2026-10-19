@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from app import events
 from app import lang as langs
-from app.agent import readback, values
+from app.agent import fields, readback, values
 from app.voice import intent_llm
 
 LLM_TIMEOUT_S = 6.0
@@ -186,7 +186,7 @@ _LEAD_IN = re.compile(r"^(?:(?:my|our|the|his|her)\s+)?(?:[\w-]+\s+){0,3}?(?:is|
 def _rule_text(text: str) -> str | None:
     """Plain English answers: drop a short lead-in ("my name is ...") and keep the value's case."""
     stripped = " ".join(text.split()).strip(" .,!?।॥")
-    if not stripped or not stripped.isascii() or readback._mentions_negation(stripped):
+    if not stripped or not stripped.isascii() or readback.mentions_negation(stripped):
         return None
     lead = _LEAD_IN.match(stripped.lower())
     if lead:
@@ -200,7 +200,10 @@ def _rules(spec: FieldSpec, utterance: str, language: str | None) -> Parsed:
         match = readback.match_option(utterance, spec.options)
         return Parsed(match, True, "rules") if match else Parsed(None)
     if spec.kind == "digits":
-        value = validate(spec, readback.parse_digits(utterance, language))
+        digits = readback.parse_digits(utterance, language)
+        if spec.max_len == 10 and len(digits) == 12 and digits.startswith("91"):
+            digits = digits[2:]  # "+91 98…"
+        value = validate(spec, digits)
         return Parsed(value, True, "rules") if value else Parsed(None)
     if spec.kind == "number":
         numbers = re.findall(r"\d+(?:\.\d+)?", utterance)  # numerals only: "eighty one" goes to the LLM
@@ -295,6 +298,43 @@ async def parse_answer(
         utterance=utterance, value=parsed.value, confident=parsed.confident, source=parsed.source,
     )
     return parsed
+
+
+def default_spec(key: str, label: str = "") -> FieldSpec:
+    """Spec for a known field that is not on the current page (e.g. a mid-run correction)."""
+    known = fields.BY_KEY.get(key)
+    spec = FieldSpec(label=label or key, kind=known.kind if known else "text", key=key)
+    if known and known.length:
+        spec.min_len = spec.max_len = known.length
+    if known and known.kind == "number":
+        spec.min_val, spec.max_val = 0, known.max_val
+    return spec
+
+
+async def correction_value(
+    spec: FieldSpec, utterance: str, *, trace_id: str = "", language: str | None = None
+) -> str | None:
+    """New value from a correction ("my number changed to 98…", "नाम सीता देवी करो"), any language.
+
+    Free text is the risky case: the sentence also carries the field name and change words,
+    sometimes the old value too. The LLM picks the new value; without it, filler words are
+    stripped and two-value phrasings ("remove X, put Y", "… not X") ask again instead.
+    """
+    if spec.kind != "text":
+        return (await parse_answer(spec, utterance, trace_id=trace_id, language=language)).value
+    if readback.mentions_replacement(utterance) or readback.mentions_negation(utterance):
+        return None
+    value = (await _llm(spec, utterance, trace_id, language)).value
+    if value is None:
+        value = validate(spec, readback.clean_text_value(utterance), language)
+        if value and spec.key == "full_name" and readback.has_repeated_token(value):
+            return None  # old and new name in one sentence
+        lang = langs.get(language)
+        leftovers = [w for words in lang.field_words().values() for w in words] + lang.word_list("change")
+        if value and any(readback.has_word(readback.normalize_text(value), w) for w in leftovers):
+            return None  # still a sentence ("मेरा नाम गलत है"): ask for just the new value
+    events.log_event(trace_id or "voice", "voice.correction_parsed", field=spec.key, utterance=utterance, value=value)
+    return value
 
 
 def spoken(spec: FieldSpec, value: str, lang: langs.Lang | None = None) -> str:

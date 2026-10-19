@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import httpx
 
-from app import config
+from app import config, lang
 from app.portal import db as portal_db
 
 NEW_PHONE = "9876500000"
@@ -45,6 +45,9 @@ async def status(client: httpx.AsyncClient, sid: str) -> dict:
     response = await client.get(f"/api/voice/session/{sid}")
     response.raise_for_status()
     return response.json()
+
+
+DISTRICT = lang.get("te-IN").label("district")  # the agent asks in Telugu (default language)
 
 
 async def run_until_done(client: httpx.AsyncClient, sid: str, answer_fn, timeout: float = 300.0) -> dict:
@@ -73,10 +76,10 @@ async def main() -> int:
 
         def answer_simple(prompt, _data):
             prompts.append(prompt)
-            return "గుంటూరు" if "District" in prompt else "అవును"
+            return "గుంటూరు" if DISTRICT in prompt else "అవును"
 
         data = await run_until_done(client, sid, answer_simple)
-        check("missing district asked by voice", any("District" in p for p in prompts), f"{len(prompts)} prompts")
+        check("missing district asked by voice", any(DISTRICT in p for p in prompts), f"{len(prompts)} prompts")
         check("name/phone read-back asked", any("సరేనా" in p for p in prompts))
         check("reached review (success)", data.get("stop_reason") == "done", str(data.get("stop_reason")))
         check("phone read-back shows digit words", any("తొమ్మిది" in p for p in prompts))
@@ -98,7 +101,7 @@ async def main() -> int:
             if "సరేనా" in prompt and not state["said_no"]:
                 state["said_no"] = True
                 return "కాదు"
-            if "District" in prompt:
+            if DISTRICT in prompt:
                 return "గుంటూరు"
             return "అవును"
 
@@ -123,7 +126,7 @@ async def main() -> int:
             if "కొత్త ఫోన్" in prompt:
                 state["asked_new"] = True
                 return DIGITS
-            if "District" in prompt:
+            if DISTRICT in prompt:
                 return "గుంటూరు"
             return "అవును"
 
@@ -160,7 +163,7 @@ async def main() -> int:
 
         def answer_name(prompt, _data):
             prompts.append(prompt)
-            return "గుంటూరు" if "District" in prompt else "అవును"
+            return "గుంటూరు" if DISTRICT in prompt else "అవును"
 
         data = await run_until_done(client, sid, answer_name)
         payload = portal_db.draft_payload(config.PORTAL_TEST_USER)
@@ -184,7 +187,7 @@ async def main() -> int:
                 break
             if data["awaiting_input"] and data["prompt_text"] != last_prompt:
                 last_prompt = data["prompt_text"]
-                answer = "గుంటూరు" if "District" in last_prompt else "అవును"
+                answer = "గుంటూరు" if DISTRICT in last_prompt else "అవును"
                 await client.post("/api/voice/answer", data={"text": answer})
             await asyncio.sleep(0.15)
         check("run reached post-form-1 before the correction", len(data.get("steps", [])) >= 13, str(len(data.get("steps", []))))
@@ -197,7 +200,7 @@ async def main() -> int:
             check("post-save correction routed as answer", routed.get("answered") is True, str(routed))
             r2 = await client.post("/api/voice/answer", data={"text": "Sita Devi"})
             check("post-save correction accepted", r2.status_code == 200, str(r2.json()))
-        data = await run_until_done(client, sid, lambda p, d: "గుంటూరు" if "District" in p else "అవును")
+        data = await run_until_done(client, sid, lambda p, d: "గుంటూరు" if DISTRICT in p else "అవును")
         payload = portal_db.draft_payload(config.PORTAL_TEST_USER)
         check("post-save correction updates the record", payload.get("full_name") == "Sita Devi", str(payload.get("full_name")))
         check("run completed after post-save correction", data.get("stop_reason") == "done", str(data.get("stop_reason")))

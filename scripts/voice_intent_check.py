@@ -23,6 +23,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from app import config, events
+from app.agent import answers
+from app.agent.voice_ux import VoiceAgent
 from app.voice import intent_llm
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -59,35 +61,24 @@ async def main() -> int:
     intent = await parse({"action": "edit", "edits": [{"field": "password", "value": "hunter2"}], "confidence": 0.99})
     check("hallucinated/secret field dropped", intent is not None and intent.action == "unclear", repr(intent))
 
-    intent = await parse(
-        {
-            "action": "edit",
-            "edits": [{"field": "full_name", "value": "నిహారిక రవికుమార్ అని తీసేసి నిహారిక"}],
-            "confidence": 0.9,
-        }
-    )
-    check(
-        "instruction sentence value sanitized away",
-        intent is not None and intent.edits and intent.edits[0].value is None,
-        repr(intent),
-    )
+    # Proposed values are checked against the field's rules by the session's VoiceAgent
+    # (rules only here: the model call inside value_for is stubbed out).
+    async def no_llm(_spec, _utterance):
+        return None
 
-    intent = await parse(
-        {"action": "edit", "edits": [{"field": "district", "value": "గుంటూరు"}], "confidence": 0.9}
-    )
-    check("district value matched to portal option", intent is not None and intent.edits[0].value == "Guntur", repr(intent))
-
-    intent = await parse(
-        {"action": "edit", "edits": [{"field": "phone", "value": "నైన్ ఎయిట్ ఏడు ఆరు ఐదు నాలుగు మూడు రెండు ఒకటి సున్నా"}], "confidence": 0.9}
-    )
-    check("phone digits normalized", intent is not None and intent.edits[0].value == "9876543210", repr(intent))
+    answers._llm_extract = no_llm
+    voice = VoiceAgent(say=lambda _m: None, ask=None, language="te-IN")
+    voice.note_field({"label": "District", "tag": "select", "type": "", "constraints": {}},
+                     ["Guntur", "Krishna", "Kurnool", "Hyderabad"])
 
     intent = await parse({"action": "edit", "edits": [{"field": "full_name", "value": "x"}], "confidence": 1.5})
-    check(
-        "confidence clamped and short junk value dropped",
-        intent is not None and intent.confidence == 1.0 and intent.edits[0].value is None,
-        repr(intent),
-    )
+    check("confidence clamped", intent is not None and intent.confidence == 1.0, repr(intent))
+    check("short junk value rejected by the field", await voice.value_for("full_name", "x") is None)
+    check("instruction sentence value rejected",
+          await voice.value_for("full_name", "నిహారిక రవికుమార్ అని తీసేసి నిహారిక") is None)
+    check("district value matched to the page option", await voice.value_for("district", "గుంటూరు") == "Guntur")
+    check("phone digits normalized",
+          await voice.value_for("phone", "నైన్ ఎయిట్ ఏడు ఆరు ఐదు నాలుగు మూడు రెండు ఒకటి సున్నా") == "9876543210")
 
     intent = await parse({"action": "nonsense", "confidence": 0.9})
     check("unknown action rejected", intent is None, repr(intent))

@@ -13,14 +13,13 @@ app/
   config.py          env loading, paths, vendor endpoints
   events.py          trace_id event log -> data/task_events.jsonl
   voice/             Gnani STT/TTS adapters + streaming.py (WebSocket STT/TTS)
-  policy/            deterministic policy engine (M1: pass-through)
+  policy/            deterministic policy engine (pass-through until the M4 rule table)
   agent/             Jev client, loop, observe/values/llm + readback/voice_ux (M3 voice UX)
   browser/           Playwright controller (only module touching the browser)
   api/               voice app API (push-to-talk, sessions, answers, stop, live view)
   templates/         assistant.html (the voice app page)
   portal/            mock scholarship portal (full app flow + hostile toggles)
 scripts/
-  walking_skeleton.py   M1 smoke test: voice -> login -> form fill -> confirmation
   ui_smoke.py           M1/M3 UI smoke: text fallback -> interactive agent -> live view + audio
   hostile_check.py      M2: hostile toggles + submit dup handling (14 checks)
   agent_guards.py       M2: forced-loop / budgets / cost cap / no-progress (4 checks)
@@ -78,7 +77,6 @@ The browser asks for microphone permission on first use; allow it. Both pages ar
 With the server running:
 
 ```bash
-.venv/bin/python scripts/walking_skeleton.py       # M1: voice -> login -> form fill -> reply
 .venv/bin/python scripts/ui_smoke.py               # M1/M3: interactive UI -> live view + audio
 .venv/bin/python scripts/hostile_check.py          # M2: hostile toggles (14 checks)
 .venv/bin/python scripts/agent_guards.py           # M2: budgets/no-progress guards (4 checks)
@@ -94,10 +92,6 @@ BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_session_check.py  
 BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_ws_check.py       # M4: /ws/voice E2E
 BASE_URL=http://127.0.0.1:8765 .venv/bin/python scripts/voice_ws_ui_check.py    # M4: voice-started run shown in the UI
 ```
-
-`walking_skeleton.py` synthesizes a Telugu command, transcribes it, drives the login +
-OTP + dashboard + form-1 (fills name and phone), verifies the fields, saves a screenshot,
-and speaks a confirmation. All stages share one `trace_id` in `data/task_events.jsonl`.
 
 `agent_measure.py` runs the full Jev-driven agent (login → forms 1/2/3 → review) N times
 and writes a report to `data/agent_measure_<ts>.json` (pass rate, median step time).

@@ -15,6 +15,7 @@ import re
 import unicodedata
 
 from app import lang as langs
+from app.lang.script import sound_key
 
 _TE = langs.get("te-IN")
 
@@ -24,34 +25,11 @@ YES_WORDS = [w.lstrip("=") for w in _TE.word_list("yes")]
 NO_WORDS = [w.lstrip("=") for w in _TE.word_list("no")]
 STOP_WORDS = [w.lstrip("=") for w in _TE.word_list("stop")]
 
-# Correction detection: change markers (field names come from the language files).
-CHANGE_WORDS = [
-    "మారింది", "మారిపోయింది", "మార్చ", "మార్చండి", "కొత్త", "సరిచేయ", "తప్పు", "సరికాదు",
-    "చేంజ్", "చేంజ్డ్", "అప్డేట్",
-    "change", "changed", "update", "new", "correct", "wrong", "incorrect",
-]
-
 # "Is this a request to (continue) the application task?"
 INTENT_WORDS = [
     "application", "scholarship", "apply", "form", "fill", "submit", "start", "login",
     "అప్లికేషన్", "స్కాలర్షిప్", "దరఖాస్తు", "ఫారం", "నింప",
 ]
-
-# Telugu-script variants for English option values on the portal.
-OPTION_ALIASES: dict[str, list[str]] = {
-    "Guntur": ["గుంటూరు", "గుంటూర్", "గుంటురు", "guntur"],
-    "Krishna": ["కృష్ణా", "కృష్ణ", "krishna"],
-    "Kurnool": ["కూర్నూల్", "కర్నూలు", "kurnool"],
-    "Visakhapatnam": ["విశాఖపట్నం", "విశాఖ", "visakhapatnam", "vizag"],
-    "Hyderabad": ["హైదరాబాద్", "హైదరాబాదు", "hyderabad"],
-    "Warangal": ["వరంగల్", "వరంగల్లు", "warangal"],
-    "Karimnagar": ["కరీంనగర్", "karimnagar"],
-    "Nizamabad": ["నిజామాబాద్", "nizamabad"],
-    "Andhra Pradesh": ["ఆంధ్రప్రదేశ్", "ఆంధ్ర ప్రదేశ్", "ఆంధ్ర", "andhra pradesh", "andhra"],
-    "Telangana": ["తెలంగాణ", "తెలంగాణా", "telangana"],
-}
-
-DISTRICT_OPTIONS = [name for name in OPTION_ALIASES if name not in ("Andhra Pradesh", "Telangana")]
 
 # Fillers stripped when a free-text value (name/address/college/email) is spoken.
 TEXT_FILLERS = [
@@ -137,18 +115,26 @@ def is_repeat(text: str, language: str | None = None) -> bool:
     return _any(text, langs.get(language).word_list("repeat"))
 
 
+def _sound_match(normalized: str, options: list[str]) -> str | None:
+    """The one option that sounds like the answer or a 1-3 word part of it (consonant keys)."""
+    keys = {option: sound_key(option) for option in options}
+    words = normalized.split()
+    spans = {" ".join(words[i:j]) for i in range(len(words)) for j in range(i + 1, min(len(words), i + 3) + 1)}
+    found = {option for span in spans if len(key := sound_key(span)) >= 3 for option, k in keys.items() if k == key}
+    return found.pop() if len(found) == 1 else None
+
+
 def match_option(text: str, options: list[str]) -> str | None:
-    """Match a spoken answer to one of the portal's option labels (glossary-aware)."""
+    """Match a spoken answer to one of the page's options, in any script ("గుంటూరు" -> Guntur)."""
     normalized = normalize_text(text)
     if not normalized:
         return None
     for option in options:
         if normalize_text(option) == normalized:
             return option
-    for option in options:
-        for alias in OPTION_ALIASES.get(option, []):
-            if alias.lower() in normalized:
-                return option
+    sounded = _sound_match(normalized, options)
+    if sounded:
+        return sounded
     if len(normalized) < 3:
         return None  # "a" must not pick "Male"
     for option in options:
@@ -184,7 +170,7 @@ def clean_text_value(text: str) -> str | None:
     """
     token_fillers = {
         normalize_text(word)
-        for group in (_TE.field_words()["full_name"], CHANGE_WORDS, YES_WORDS, NO_WORDS, STOP_WORDS, TEXT_FILLERS)
+        for group in (_TE.field_words()["full_name"], _TE.word_list("change"), YES_WORDS, NO_WORDS, STOP_WORDS, TEXT_FILLERS)
         for word in group
     }
     kept: list[str] = []
@@ -211,7 +197,7 @@ def parse_field_choice(text: str, language: str | None = None) -> str | None:
     return None
 
 
-def _has_repeated_token(value: str) -> bool:
+def has_repeated_token(value: str) -> bool:
     """True when a value repeats a word ("… నిహారిక … నిహారిక") — old + new mixed."""
     seen: set[str] = set()
     for token in normalize_text(value).split():
@@ -221,7 +207,7 @@ def _has_repeated_token(value: str) -> bool:
     return False
 
 
-def _mentions_negation(text: str) -> bool:
+def mentions_negation(text: str) -> bool:
     """True when a value is being rejected ("పేరు సీత కాదు" = the name is not Sita).
 
     Latin "no"/"not" needs word boundaries ("Nora", "Nolan" are names).
@@ -232,37 +218,14 @@ def _mentions_negation(text: str) -> bool:
     return any(word in normalized for word in ("కాదు", "వద్దు", "లేదు", "తప్పు", "kadu", "ledu", "vaddu"))
 
 
-def extract_field_value(field: str, text: str, language: str | None = None) -> str | None:
-    """Pull a usable value for a corrected field out of an utterance."""
+def change_requested(text: str, language: str | None = None) -> bool:
+    """True when the utterance asks for a field to be changed ("…మారింది", "बदलना है", "is wrong")."""
     normalized = normalize_text(text)
-    if field == "phone":
-        digits = parse_digits(normalized, language)
-        if len(digits) == 12 and digits.startswith("91"):
-            digits = digits[2:]  # "+91 98…"
-        return digits if len(digits) == 10 else None
-    if field == "pin":
-        digits = parse_digits(normalized, language)
-        return digits if len(digits) == 6 else None
-    if field == "district":
-        return match_option(normalized, DISTRICT_OPTIONS)
-    if field in ("full_name", "address", "college", "email"):
-        if any(word in normalized for word in REPLACEMENT_WORDS):
-            return None  # "remove X, set Y": ask for the new value instead
-        if _mentions_negation(normalized):
-            return None  # "… is not X": X is the value being rejected
-        value = clean_text_value(normalized)
-        if field == "full_name" and value and _has_repeated_token(value):
-            return None  # old and new name in one sentence: ask again
-        return value
-    return None
-
-
-def _change_requested(normalized: str) -> bool:
-    """True when the utterance asks for a field to be changed."""
-    if any(word in normalized for word in CHANGE_WORDS + REPLACEMENT_WORDS):
+    lang = langs.get(language)
+    if _any(normalized, lang.word_list("change")) or _any(normalized, REPLACEMENT_WORDS):
         return True
-    if _mentions_negation(normalized):
-        return True  # "… is not X" rejects the current value
+    if mentions_negation(normalized) or _any(normalized, [w for w in lang.word_list("no") if not w.isascii()]):
+        return True  # "… is not X" / "… తప్పు" rejects the current value
     # "నా ఫోన్ నంబర్ కూడా" ("my phone number too"): a field mention with "also"
     # and no yes/no word is a change request, not agreement.
     if "కూడా" in normalized and not any(word in normalized for word in YES_WORDS + NO_WORDS):
@@ -270,18 +233,9 @@ def _change_requested(normalized: str) -> bool:
     return False
 
 
-def parse_correction(text: str) -> tuple[str, str | None] | None:
-    """Detect "field changed" intent. Returns (field, value|None), or None."""
-    normalized = normalize_text(text)
-    field = parse_field_choice(normalized)
-    if field is None:
-        return None
-    value = extract_field_value(field, normalized)
-    if value is None and not _change_requested(normalized):
-        if field == "full_name" and _has_repeated_token(clean_text_value(normalized) or ""):
-            return field, None  # old + new name in one sentence: ask again
-        return None
-    return field, value
+def mentions_replacement(text: str) -> bool:
+    """"remove X and set Y" carries two values; picking one from messy STT is unreliable."""
+    return _any(normalize_text(text), REPLACEMENT_WORDS)
 
 
 def is_application_intent(text: str) -> bool:

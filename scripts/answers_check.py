@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.agent import answers, fields, readback, values
+from app.agent import answers, fields, readback, spelling, values
 from app.agent.voice_ux import StopRequested, VoiceAgent
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -51,6 +51,8 @@ FAKE_LLM: dict[str, dict | None] = {
     "మగ కాదు": {"value": "Unknown", "confident": True},          # off-list option -> rejected
     "ముప్పై ఫిబ్రవరి": {"value": "2005-02-30", "confident": True},  # impossible date -> rejected
     "రాము": {"value": "రాము", "confident": True},                   # native script -> not confident
+    "నా పేరు నిహారిక": {"value": "Niharika", "confident": True},
+    "నిహారిక అట్ ది రేట్ జీమెయిల్ డాట్ కామ్": {"value": "niharika@gmail.com", "confident": True},
 }
 
 
@@ -211,6 +213,35 @@ async def main() -> int:
         {"tag": "button", "label": "Save & Continue"}, {"path": "/portal/application/form-1"}, {}
     )
     check("no second name/phone read-back when both were confirmed", len(v.asked) == before)
+
+    # ---- spelling letter by letter (replays a real conversation from the event log)
+    for text, want in [
+        ("ఎన్ ఈ ఈ హెచ్ ఏ ఆర్ ఐ కే ఏ", "neeharika"), ("ఎన్ఈఈ హెచ్ఏఆర్ఐ కే ఏ", "neeharika"),
+        ("एन ई ई एच ए आर आई के ए", "neeharika"), ("என் ஈ ஈ ஹெச் ஏ ஆர் ஐ கே ஏ", "neeharika"),
+        ("ಎನ್ ಈ ಈ ಹೆಚ್ ಎ ಆರ್ ಐ ಕೆ ಎ", "neeharika"), ("എൻ ഈ ഈ എച്ച് എ ആർ ഐ കെ എ", "neeharika"),
+        ("এন ই ই এইচ এ আর আই কে এ", "neeharika"), ("ਐੱਨ ਈ ਈ ਐੱਚ ਏ ਆਰ ਆਈ ਕੇ ਏ", "neeharika"),
+        ("એન ઈ ઈ એચ એ આર આઈ કે એ", "neeharika"), ("N E E H A R I K A", "neeharika"),
+        ("n double e h a r i k a", "neeharika"),
+        ("ఎన్ ఐ అట్ ది రేట్ జీమెయిల్ డాట్ కామ్", "ni@gmail.com"),
+    ]:
+        check(f"spelled: {text[:24]}", spelling.decode(text) == want, spelling.decode(text))
+    check("meta sentences hold no letters", spelling.decode("నా స్పెల్లింగ్ చెప్తాను సరిగ్గా విను సరేనా") == ""
+          and spelling.decode("నా పేరులో స్పెల్లింగ్ తప్పు") == "")
+    check("'spelling' heard in Telugu / Hindi / English",
+          all(spelling.mentions_spelling(t) for t in ("స్పెల్లింగ్ తప్పు", "स्पेलिंग गलत है", "spelling is wrong")))
+
+    v = FakeVoice(["నా పేరు నిహారిక", "నా పేరులో స్పెల్లింగ్ తప్పు", "ఎన్ఈఈ హెచ్ఏఆర్ఐ కే ఏ", "అవును"])
+    value = await v.agent.ask_field(NAME, [])
+    check("'spelling wrong' -> asks for letters, takes them", value == "Neeharika", f"{value} {v.asked}")
+    check("asks to spell, then reads letters back", v.asked[2] == v.agent.lang.say("ask_spelling")
+          and "N, E, E, H, A, R, I, K, A" in v.asked[3], str(v.asked[2:]))
+    v = FakeVoice(["నా స్పెల్లింగ్ చెప్తాను సరిగ్గా విను సరేనా", "ఎన్ ఈ ఈ హెచ్ ఏ ఆర్ ఐ కే ఏ", "అవును"])
+    value = await v.agent.ask_field(NAME, [])
+    check("'I'll spell it' is never stored as the name", value == "Neeharika", f"{value} {v.asked}")
+    v = FakeVoice(["నిహారిక అట్ ది రేట్ జీమెయిల్ డాట్ కామ్", "స్పెల్లింగ్ తప్పు",
+                   "ఎన్ ఈ ఈ హెచ్ ఏ ఆర్ ఐ కే ఏ", "అవును"])
+    value = await v.agent.ask_field(EMAIL, [])
+    check("email: spelling only the name part keeps the domain", value == "neeharika@gmail.com", f"{value} {v.asked}")
 
     # one field registry: page label -> profile key (whole words, specific first)
     labels = {

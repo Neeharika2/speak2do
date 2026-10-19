@@ -19,6 +19,7 @@
     "ask_options": "Please say the {label}. Options: {options}.",
     "retry": "Sorry, I did not understand. ",
     "reask": "Okay, please say it again. ",
+    "ask_spelling": "Please spell it letter by letter.",
     "confirm": "{value}. Is that correct?",
     "echo": "{value}, okay.",
     "hint_digits": " Please say {n} digits.",
@@ -52,6 +53,7 @@
     "no": ["no", "nope", "not", "wrong", "incorrect"],
     "stop": ["stop", "cancel"],
     "repeat": ["repeat", "again", "pardon"],
+    "change": ["change", "changed", "update", "new", "correct", "wrong", "incorrect", "edit"],
     "digits": ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"],
     "digit_aliases": {"oh": "0"},
     "field_words": {

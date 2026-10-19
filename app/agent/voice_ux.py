@@ -15,7 +15,7 @@ import asyncio
 from typing import Awaitable, Callable
 
 from app import lang as langs
-from app.agent import answers, fields, readback
+from app.agent import answers, fields, readback, spelling
 
 
 class StopRequested(Exception):
@@ -29,6 +29,7 @@ class HandoffError(Exception):
 FORM_1 = "/portal/application/form-1"
 CORRECTION_CYCLES = 3
 FIELD_ATTEMPTS = 4                              # tries to get a usable answer for one field
+SPELLABLE = {"text", "email"}                 # kinds the user may spell letter by letter
 CONFIRM_KEYS = fields.CONFIRM_KEYS  # always confirmed: spelling matters
 
 # page path -> phrase key spoken when the agent arrives there
@@ -65,6 +66,45 @@ class VoiceAgent:
         self._readbacks: set[str] = set()
         self._answered: set[str] = set()   # fields whose value came from the user's voice
         self._confirmed: set[str] = set()  # ... and that the user explicitly confirmed
+        self._specs: dict[str, answers.FieldSpec] = {}  # field rules seen on the pages so far
+
+    # ------------------------------------------------------------------ corrections (any language)
+
+    def note_field(self, element: dict, options: list[str]) -> None:
+        """Remember a page field's rules (length, options) so later corrections obey them."""
+        spec = answers.field_spec(element, options)
+        if spec.key:
+            self._specs[spec.key] = spec
+
+    def spec_for(self, key: str) -> answers.FieldSpec:
+        return self._specs.get(key) or answers.default_spec(key, self.lang.label(key))
+
+    async def value_for(self, key: str, text: str) -> str | None:
+        """The new value for `key` in a correction utterance, or None."""
+        return await answers.correction_value(
+            self.spec_for(key), text, trace_id=self._trace_id, language=self.lang.code
+        )
+
+    async def correction_in(self, text: str) -> tuple[str, str | None] | None:
+        """Is this a correction? (field, new value or None = ask for it). None = not a correction."""
+        key = readback.parse_field_choice(text, self.lang.code)
+        if key is None:
+            return None
+        value = await self.value_for(key, text)
+        if value is None and not readback.change_requested(text, self.lang.code):
+            if key == "full_name" and readback.has_repeated_token(readback.clean_text_value(text) or ""):
+                return key, None  # old + new name in one sentence: ask again
+            return None
+        return key, value
+
+    async def ask_new_value(self, key: str) -> str | None:
+        """"New phone number?" — up to two tries."""
+        prompt = self.lang.say("new_value", label=self.lang.label(key))
+        for _ in range(2):
+            value = await self.value_for(key, await self._ask_and_parse(prompt, "value"))
+            if value:
+                return value
+        return None
 
     async def on_page(self, path: str) -> None:
         if path == self._last_path:
@@ -94,15 +134,6 @@ class VoiceAgent:
             return answer
         raise HandoffError("no usable answer after repeats")
 
-    async def _ask_value(self, field: str) -> str | None:
-        prompt = self.lang.say("new_value", label=self.lang.label(field))
-        for _ in range(2):
-            answer = await self._ask_and_parse(prompt, "value")
-            value = readback.extract_field_value(field, answer, self.lang.code)
-            if value:
-                return value
-        return None
-
     def _apply_correction(self, field: str, value: str) -> dict | None:
         if self._on_correction is None:
             return None
@@ -110,12 +141,12 @@ class VoiceAgent:
 
     async def _correction_from_answer(self, answer: str, profile: dict) -> tuple[dict | None, bool]:
         """If the answer is a correction, collect the value and apply it."""
-        correction = readback.parse_correction(answer)
+        correction = await self.correction_in(answer)
         if correction is None:
             return profile, False
         field, value = correction
         if value is None:
-            value = await self._ask_value(field)
+            value = await self.ask_new_value(field)
         if not value:
             return None, True
         return self._apply_correction(field, value), True
@@ -155,7 +186,7 @@ class VoiceAgent:
             )
             if field is None:
                 return None
-            value = await self._ask_value(field)
+            value = await self.ask_new_value(field)
             if not value:
                 return None
             updated = self._apply_correction(field, value)
@@ -167,6 +198,8 @@ class VoiceAgent:
     async def ask_field(self, element: dict, options: list[str]) -> str:
         """Ask for one field, parse + validate the answer, confirm or echo it, and remember it."""
         spec = answers.field_spec(element, options)
+        if spec.key:
+            self._specs[spec.key] = spec
         label = self.lang.label(spec.key, spec.label)
         if options:
             base = self.lang.say("ask_options", label=label, options=", ".join(options))
@@ -174,27 +207,68 @@ class VoiceAgent:
             base = self.lang.say("ask_value", label=label)
         prompt = base
         answer: str | None = None
+        can_spell = spec.kind in SPELLABLE
+        spelling_mode = False  # the user chose to spell the value letter by letter
+        last_value: str | None = None
         for _ in range(FIELD_ATTEMPTS):
             if answer is None:
                 answer = await self._ask_and_parse(prompt, spec.kind)
+            if can_spell and spelling.mentions_spelling(answer):
+                spelling_mode = True
+            if spelling_mode:
+                value = self._spelled(spec, answer, last_value)
+                answer = None
+                if value is None:  # "I'll spell it" / "the spelling is wrong": ask for the letters
+                    prompt = self.lang.say("ask_spelling")
+                    continue
+                reply = await self._ask_and_parse(self.lang.say("confirm", value=self._spell_back(value)), "yes_no")
+                verdict = readback.parse_yes_no(reply, self.lang.code)
+                if verdict is True:
+                    return self._accept(spec, value, confirmed=True)
+                if verdict is None:
+                    answer = reply  # probably the letters again
+                prompt = self.lang.say("reask") + self.lang.say("ask_spelling")
+                continue
             parsed = await answers.parse_answer(spec, answer, trace_id=self._trace_id, language=self.lang.code)
             answer = None
             if parsed.value is None:
                 prompt = self.lang.say("retry") + base + answers.hint(spec, self.lang)
                 continue
+            last_value = parsed.value
             said = answers.spoken(spec, parsed.value, self.lang)
             if spec.key in CONFIRM_KEYS or not parsed.confident:
                 reply = await self._ask_and_parse(self.lang.say("confirm", value=said), "yes_no")
                 verdict = readback.parse_yes_no(reply, self.lang.code)
                 if verdict is True:
                     return self._accept(spec, parsed.value, confirmed=True)
-                if verdict is None:
-                    answer = reply  # they may have just said the (corrected) value again
+                if verdict is None or (can_spell and spelling.mentions_spelling(reply)):
+                    answer = reply  # a corrected value, or "the spelling is wrong"
+                    continue
                 prompt = self.lang.say("reask") + base
                 continue
             self._say(self.lang.say("echo", value=said))  # echo, then move on
             return self._accept(spec, parsed.value, confirmed=False)
         raise HandoffError(f"no usable answer for {spec.label!r}")
+
+    def _spelled(self, spec: answers.FieldSpec, text: str, last_value: str | None) -> str | None:
+        """Letters the user spelled -> a valid value; None when no letters were heard yet."""
+        letters = spelling.decode(text)
+        if spelling.letter_count(letters) < 2:
+            return None
+        if spec.kind == "email":
+            value = letters.replace(" ", "").lower()
+            if "@" not in value and last_value and "@" in last_value:
+                value += "@" + last_value.split("@", 1)[1]  # only the part before @ was spelled
+        else:
+            value = " ".join(word.capitalize() for word in letters.split())
+        return answers.validate(spec, value, self.lang.code)
+
+    @staticmethod
+    def _spell_back(value: str) -> str:
+        if "@" in value:
+            local, domain = value.split("@", 1)
+            return f"{spelling.spell_out(local)} @ {domain}"
+        return spelling.spell_out(value)
 
     def _accept(self, spec: answers.FieldSpec, value: str, *, confirmed: bool) -> str:
         if spec.key:

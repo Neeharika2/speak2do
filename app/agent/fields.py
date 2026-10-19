@@ -20,6 +20,11 @@ class Field:
     secret: bool = False          # never logged, spoken, or sent to a model
     confirm: bool = False         # always read back for a yes/no (spelling matters)
     not_with: tuple[str, ...] = ()  # label words that mean some other field
+    # Answer shape when the page is not in view (a mid-run correction); the page's own
+    # constraints win whenever the field has been seen.
+    kind: str = "text"            # text | digits | number | date | email
+    length: int | None = None     # exact digit count
+    max_val: float | None = None
 
 
 # Order matters: the first match wins, so specific fields come before generic ones
@@ -28,19 +33,19 @@ FIELDS: tuple[Field, ...] = (
     Field("user_id", ("user id", "userid", "username", "user name"), login=True),
     Field("otp", ("otp", "one time"), login=True, secret=True),
     Field("password", ("password",), login=True, secret=True),
-    Field("email", ("email", "e mail"), confirm=True),
-    Field("phone", ("mobile", "phone"), confirm=True),
-    Field("dob", ("date of birth", "dob", "birth date"), confirm=True),
+    Field("email", ("email", "e mail"), confirm=True, kind="email"),
+    Field("phone", ("mobile", "phone"), confirm=True, kind="digits", length=10),
+    Field("dob", ("date of birth", "dob", "birth date"), confirm=True, kind="date"),
     Field("gender", ("gender",)),
     Field("college", ("college",)),
     Field("course", ("course",)),
     Field("year", ("year",)),
-    Field("marks", ("marks", "percentage")),
+    Field("marks", ("marks", "percentage"), kind="number", max_val=100),
     Field("address", ("address",)),
     Field("city", ("city", "village")),
     Field("district", ("district",)),
     Field("state", ("state",)),
-    Field("pin", ("pin", "pincode", "postal")),
+    Field("pin", ("pin", "pincode", "postal"), kind="digits", length=6),
     Field("full_name", ("full name", "name"), confirm=True,
           not_with=("father", "mother", "guardian", "parent", "spouse", "husband", "wife", "nominee")),
 )

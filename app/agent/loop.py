@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from app import events, policy
-from app.agent import jev_client, values
+from app.agent import jev_client, readback, values
 from app.agent.observe import observe_page
 from app.agent.voice_ux import HandoffError, StopRequested
 from app.browser.controller import BrowserController
@@ -144,6 +144,10 @@ def _choose_option(options: list[dict], wanted: str) -> dict | None:
         text = option["text"].lower()
         if text.startswith(wanted) or wanted.startswith(text):
             return option
+    # a value said in another script ("గుంటూరు") matches the option that sounds the same
+    sounded = readback.match_option(wanted, [o["text"] for o in usable])
+    if sounded:
+        return next(o for o in usable if o["text"] == sounded)
     return None  # never guess: a wrong option is worse than asking again
 
 
@@ -167,10 +171,11 @@ async def _perform(browser: BrowserController, element: dict, operation: str, va
         raise ValueError(f"unsupported operation: {operation}")
 
 
-async def _apply_overrides(browser: BrowserController, trace_id: str, obs: dict, overrides: dict) -> None:
-    """Re-fill fields on the current page whose value was corrected by voice."""
+async def _apply_overrides(browser: BrowserController, trace_id: str, obs: dict, overrides: dict) -> dict:
+    """Re-fill fields on the current page whose value was corrected by voice; returns {key: value}."""
+    applied: dict = {}
     if not overrides:
-        return
+        return applied
     for element in obs["elements"]:
         key = values.label_key(element["label"])
         if key is None or key not in overrides:
@@ -185,9 +190,11 @@ async def _apply_overrides(browser: BrowserController, trace_id: str, obs: dict,
             continue
         try:
             await _perform(browser, element, operation, wanted)
+            applied[key] = wanted
             events.log_event(trace_id, "agent.override_applied", field=key, label=element["label"])
         except Exception as exc:  # noqa: BLE001
             events.log_event(trace_id, "agent.override_error", field=key, error=str(exc))
+    return applied
 
 
 async def run_agent_goal(
@@ -241,6 +248,28 @@ async def run_agent_goal(
     def goal_reached() -> bool:
         return bool(success_url) and browser.page is not None and success_url in browser.page.url
 
+    # Where each field was filled, and with what: a later voice correction to a field on a
+    # page the agent already left sends it back to that page (works on any multi-page form).
+    filled: dict[str, tuple[str, str]] = {}  # key -> (page url, value)
+
+    def remember_fill(key: str | None, value: str) -> None:
+        if key and value and browser.page is not None:
+            filled[key] = (browser.page.url, str(value).strip())
+
+    def stale_page() -> tuple[str, str] | None:
+        """(field, page url) of a filled field whose value was corrected since, if any."""
+        if profile_overrides is None or browser.page is None:
+            return None
+        try:
+            overrides = profile_overrides() or {}
+        except Exception:  # noqa: BLE001
+            return None
+        for key, (url, value) in filled.items():
+            wanted = str(overrides.get(key) or "").strip()
+            if wanted and wanted != value and url != browser.page.url:
+                return key, url
+        return None
+
     try:
         await browser.goto(start_url)
         events.log_event(trace_id, "agent.start", goal=goal, start_url=start_url, success_url=success_url)
@@ -249,6 +278,20 @@ async def run_agent_goal(
             if stop_check and stop_check():
                 stop_reason = "user_stop"
                 break
+            revisit = stale_page()
+            if revisit is not None:
+                field, url = revisit
+                events.log_event(trace_id, "agent.revisit", field=field, url=url)
+                actions.append(f"revisit {field} ({url})")
+                try:
+                    await browser.goto(url)
+                    arrived = browser.page is not None and browser.page.url == url
+                except Exception as exc:  # noqa: BLE001
+                    events.log_event(trace_id, "agent.revisit_error", field=field, error=str(exc))
+                    arrived = False
+                if not arrived:
+                    filled.pop(field, None)  # the page is gone or redirects: never loop on it
+                continue
             if goal_reached():
                 stop_reason = "done"
                 break
@@ -326,18 +369,23 @@ async def run_agent_goal(
 
             value = ""
             if operation in ("type", "select"):
-                mapped = values.mapped_value(element["label"], current_profile())
-                if mapped is not None and str(mapped).strip():
-                    value = mapped
-                elif voice_io is not None:
-                    try:
-                        options: list[str] = []
-                        if element["tag"] == "select" and browser.page is not None:
+                options: list[str] = []
+                if voice_io is not None:
+                    if element["tag"] == "select" and browser.page is not None:
+                        try:
                             options = await browser.page.locator(
                                 f'[data-agent-id="{element["id"]}"]'
                             ).evaluate(
                                 "el => Array.from(el.options).map(o => o.text.trim()).filter(t => t && t !== 'Select')"
                             )
+                        except Exception:  # noqa: BLE001 — options are a hint, not required
+                            options = []
+                    voice_io.note_field(element, options)  # later corrections obey this field's rules
+                mapped = values.mapped_value(element["label"], current_profile())
+                if mapped is not None and str(mapped).strip():
+                    value = mapped
+                elif voice_io is not None:
+                    try:
                         value = await voice_io.ask_field(element, options)
                     except StopRequested:
                         stop_reason = "user_stop"
@@ -372,7 +420,8 @@ async def run_agent_goal(
                     break
             if profile_overrides is not None:
                 try:
-                    await _apply_overrides(browser, trace_id, obs, profile_overrides() or {})
+                    for key, wanted in (await _apply_overrides(browser, trace_id, obs, profile_overrides() or {})).items():
+                        remember_fill(key, wanted)
                 except Exception as exc:  # noqa: BLE001
                     events.log_event(trace_id, "agent.override_error", error=str(exc))
 
@@ -400,6 +449,8 @@ async def run_agent_goal(
                     break
                 continue
             consecutive_errors = 0
+            if operation in ("type", "select"):
+                remember_fill(values.label_key(element["label"]), value)
 
             actions.append(label)
             recent.append(label)

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from app import config, events
-from app.agent import fields, readback
+from app.agent import fields
 
 INTENT_TIMEOUT_S = 4.0  # bounded: a slow LLM must never stall a voice turn
 INTENT_MAX_TOKENS = 300  # a verdict is a short JSON object
@@ -41,13 +41,6 @@ ACTIONS = ("edit", "start_task", "cancel", "unclear")
 
 FAKE_ENV = "VOICE_INTENT_FAKE_JSON"
 DISABLED_ENV = "VOICE_INTENT_DISABLED"
-
-OPTION_FIELDS: dict[str, list[str]] = {
-    "gender": ["Male", "Female", "Other"],
-    "state": [name for name in readback.OPTION_ALIASES if name in ("Andhra Pradesh", "Telangana")],
-    "district": readback.DISTRICT_OPTIONS,
-}
-
 
 @dataclass
 class Edit:
@@ -215,17 +208,6 @@ def _loads_jsonish(raw: object) -> dict | None:
     return None
 
 
-def _normalize_value(field_name: str, value: str | None) -> str | None:
-    """Run a proposed value through the same sanitizers the rule layer uses."""
-    if not value or not str(value).strip():
-        return None
-    if field_name in OPTION_FIELDS:
-        return readback.match_option(str(value), OPTION_FIELDS[field_name]) or readback.clean_text_value(str(value))
-    if field_name in ("full_name", "phone", "pin", "address", "college", "email"):
-        return readback.extract_field_value(field_name, str(value))
-    return readback.clean_text_value(str(value))
-
-
 def _validate(parsed: object) -> Intent | None:
     """Shape the model output into an Intent; drop anything off-schema."""
     if not isinstance(parsed, dict):
@@ -244,7 +226,8 @@ def _validate(parsed: object) -> Intent | None:
         field_name = str(item.get("field") or "")
         if field_name not in EDITABLE_FIELDS:
             continue  # hallucinated field: never reaches the portal
-        edits.append(Edit(field_name, _normalize_value(field_name, item.get("value"))))
+        value = str(item.get("value") or "").strip() or None
+        edits.append(Edit(field_name, value))  # the caller checks it against the field's rules
     if action == "edit" and not edits:
         action = "unclear"
     return Intent(action=action, edits=edits, confidence=confidence)

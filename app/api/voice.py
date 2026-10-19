@@ -30,8 +30,7 @@ from app import config, events
 from app import lang as langs
 from app.agent import readback, values
 from app.agent.loop import run_agent_goal
-from app.agent.voice_ux import VoiceAgent
-from app.portal import db as portal_db
+from app.agent.voice_ux import HandoffError, StopRequested, VoiceAgent
 from app.voice import intent_llm, streaming, tts
 
 router = APIRouter()
@@ -87,6 +86,7 @@ class Session:
     llm_calls: int = 0
     # websocket sink for streamed speech (M4)
     ws_send: Callable[[dict], Awaitable[None]] | None = None
+    voice: VoiceAgent | None = None  # asks, parses and corrects values in the session language
 
 
 SESSIONS: dict[str, Session] = {}
@@ -160,28 +160,33 @@ def _remember_answer(session: Session, field: str, value: str) -> None:
 
 
 def _apply_session_correction(session: Session, field: str, value: str) -> dict:
-    """Apply a voice correction to the session and to the saved application record."""
+    """Apply a voice correction; the agent re-types it, going back to its page if needed."""
     session.overrides[field] = value
     events.log_event(session.trace_id, "voice.correction", field=field, value=value)
-    try:
-        portal_db.save_section(config.PORTAL_TEST_USER, {field: value})
-    except Exception as exc:  # noqa: BLE001 — the correction still applies to the session
-        events.log_event(session.trace_id, "voice.correction_db_error", error=str(exc))
     return _merged_profile(session)
 
 
+def _voice(session: Session) -> VoiceAgent:
+    """The session's voice agent (one per session: it remembers field rules and answers)."""
+    if session.voice is None:
+        session.voice = VoiceAgent(
+            say=lambda message: _publish_speech(session, message),
+            ask=lambda prompt, kind: _ask(session, prompt, kind),
+            stop_requested=lambda: session.stop_flag,
+            on_correction=lambda field, value: _apply_session_correction(session, field, value),
+            on_answer=lambda field, value: _remember_answer(session, field, value),
+            on_forget=lambda field: session.overrides.pop(field, None),
+            trace_id=session.trace_id,
+            language=session.language,
+        )
+    return session.voice
+
+
 async def _collect_field_value(session: Session, field: str) -> str | None:
-    for _ in range(2):
-        try:
-            answer = await _ask(session, _say(session, "new_value", label=_label(session, field)), "value")
-        except asyncio.TimeoutError:
-            continue  # slow answer: re-ask; the loop gives up after two tries
-        if readback.is_stop(answer, session.language):
-            return None
-        value = readback.extract_field_value(field, answer, session.language)
-        if value:
-            return value
-    return None
+    try:
+        return await _voice(session).ask_new_value(field)
+    except (StopRequested, HandoffError):
+        return None
 
 
 # --------------------------------------------------------------------------- speech (streamed TTS)
@@ -311,7 +316,8 @@ async def _apply_intent_edits(
     applied: list[str] = []
     pending: list[str] = []
     for edit in edits:
-        value = edit.value
+        # the model's value still has to fit the field (length, options, date …)
+        value = await _voice(session).value_for(edit.field, edit.value) if edit.value else None
         if value is None:
             if await_missing:
                 value = await _collect_field_value(session, edit.field)
@@ -378,16 +384,7 @@ async def _fallback_intent(session: Session, transcript: str, context: str) -> s
 async def _run_agent(session: Session) -> None:
     """Drive the portal; the agent asks the user for every value it does not know."""
     session.status = "running"
-    voice = VoiceAgent(
-        say=lambda message: _publish_speech(session, message),
-        ask=lambda prompt, kind: _ask(session, prompt, kind),
-        stop_requested=lambda: session.stop_flag,
-        on_correction=lambda field, value: _apply_session_correction(session, field, value),
-        on_answer=lambda field, value: _remember_answer(session, field, value),
-        on_forget=lambda field: session.overrides.pop(field, None),
-        trace_id=session.trace_id,
-        language=session.language,
-    )
+    voice = _voice(session)
     result = await run_agent_goal(
         config.AGENT_GOAL,
         trace_id=session.trace_id,
@@ -442,7 +439,7 @@ async def _command(session: Session, text: str) -> None:
     if not transcript:
         await _speak_reply(session, _say(session, "reply_empty"))
         return
-    correction = readback.parse_correction(transcript)
+    correction = await _voice(session).correction_in(transcript)
     if correction is not None:
         field, value = correction
         if value is None:
@@ -483,15 +480,14 @@ async def _handle_interrupt(session: Session, transcript: str) -> dict:
         session.stop_flag = True
         events.log_event(session.trace_id, "voice.stop_requested", transcript=transcript)
         return {"ok": True, "stopped": True, "transcript": transcript}
-    correction = readback.parse_correction(transcript)
+    voice = _voice(session)
+    correction = await voice.correction_in(transcript)
     if correction is None and session.pending_correction:
-        value = readback.extract_field_value(session.pending_correction, transcript, session.language)
+        value = await voice.value_for(session.pending_correction, transcript)
         if value:
             correction = (session.pending_correction, value)
     if correction is not None:
         field, value = correction
-        if value is None:
-            value = readback.extract_field_value(field, transcript, session.language)
         if value:
             _apply_session_correction(session, field, value)
             session.pending_correction = None
